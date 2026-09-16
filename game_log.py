@@ -33,7 +33,10 @@ def _summarize_board(req: Dict[str, Any]) -> Dict[str, Any]:
         "you_health": you.get("health"),
         "you_length": you.get("length"),
         "you_head": you.get("head"),
+        "you_body": you.get("body"),
+        "food": board.get("food") or [],
         "food_n": len(board.get("food") or []),
+        "hazards": board.get("hazards") or [],
         "snakes": [
             {
                 "id": s.get("id"),
@@ -41,14 +44,31 @@ def _summarize_board(req: Dict[str, Any]) -> Dict[str, Any]:
                 "health": s.get("health"),
                 "length": s.get("length"),
                 "head": s.get("head"),
+                "body": s.get("body"),
             }
             for s in snakes
         ],
     }
 
 
+def _model_meta() -> Dict[str, Any]:
+    """Stamp dials / model id onto every logged game (Replit is source of truth)."""
+    try:
+        import dials as dials_mod
+
+        d = dials_mod.load_dials()
+        return {
+            "dials_id": d.get("id"),
+            "wiring": d.get("wiring"),
+            "dials_path": str(dials_mod.dials_path() or "(defaults)"),
+        }
+    except Exception:
+        return {"dials_id": None, "wiring": None, "dials_path": None}
+
+
 def on_start(req: Dict[str, Any]) -> None:
     gid = ((req.get("game") or {}).get("id")) or f"unknown-{int(time.time())}"
+    meta = _model_meta()
     with _lock:
         _active[gid] = {
             "game_id": gid,
@@ -61,6 +81,9 @@ def on_start(req: Dict[str, Any]) -> None:
             },
             "you_name": (req.get("you") or {}).get("name"),
             "you_id": (req.get("you") or {}).get("id"),
+            "dials_id": meta.get("dials_id"),
+            "wiring": meta.get("wiring"),
+            "dials_path": meta.get("dials_path"),
             "turns": [],
             "ended_at": None,
             "outcome": None,
@@ -80,6 +103,7 @@ def on_move(req: Dict[str, Any], decision: Dict[str, Any]) -> None:
     with _lock:
         if gid not in _active:
             # Inline bootstrap — do NOT call on_start() while holding _lock (Lock is not reentrant).
+            meta = _model_meta()
             _active[gid] = {
                 "game_id": gid,
                 "started_at": time.time(),
@@ -91,6 +115,9 @@ def on_move(req: Dict[str, Any], decision: Dict[str, Any]) -> None:
                 },
                 "you_name": (req.get("you") or {}).get("name"),
                 "you_id": (req.get("you") or {}).get("id"),
+                "dials_id": meta.get("dials_id"),
+                "wiring": meta.get("wiring"),
+                "dials_path": meta.get("dials_path"),
                 "turns": [],
                 "ended_at": None,
                 "outcome": None,
@@ -103,13 +130,23 @@ def on_end(req: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     with _lock:
         game = _active.pop(gid, None)
         if game is None:
+            meta = _model_meta()
             game = {
                 "game_id": gid,
                 "started_at": time.time(),
                 "turns": [],
                 "you_name": (req.get("you") or {}).get("name"),
                 "you_id": (req.get("you") or {}).get("id"),
+                "dials_id": meta.get("dials_id"),
+                "wiring": meta.get("wiring"),
+                "dials_path": meta.get("dials_path"),
             }
+        # Refresh stamp in case dials hot-reloaded mid-game (rare).
+        if not game.get("dials_id"):
+            meta = _model_meta()
+            game["dials_id"] = meta.get("dials_id")
+            game["wiring"] = meta.get("wiring")
+            game["dials_path"] = meta.get("dials_path")
         game["ended_at"] = time.time()
         you = req.get("you") or {}
         snakes = ((req.get("board") or {}).get("snakes") or [])
@@ -165,6 +202,9 @@ def list_games(limit: int = 20) -> List[Dict[str, Any]]:
                 "ended_at": g.get("ended_at"),
                 "you_name": g.get("you_name"),
                 "final_length": ((g.get("final") or {}).get("you_length")),
+                "dials_id": g.get("dials_id"),
+                "wiring": g.get("wiring"),
+                "source": g.get("source"),
                 "file": p.name,
             }
         )

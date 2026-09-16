@@ -1234,7 +1234,11 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/dev/games":
             qs = parse_qs(urlparse(self.path).query)
             limit = int((qs.get("limit") or ["30"])[0] or 30)
-            self._json(200, {"games": game_log.list_games(min(200, max(1, limit)))})
+            dials_filter = (qs.get("dials_id") or [""])[0].strip() or None
+            games = game_log.list_games(min(200, max(1, limit)))
+            if dials_filter:
+                games = [g for g in games if (g.get("dials_id") or "") == dials_filter]
+            self._json(200, {"games": games, "dials_id": dials_filter})
             return
         if path == "/dev/batch":
             qs = parse_qs(urlparse(self.path).query)
@@ -1254,6 +1258,8 @@ class Handler(BaseHTTPRequestHandler):
                     200,
                     {
                         "game_id": game.get("game_id"),
+                        "dials_id": game.get("dials_id"),
+                        "wiring": game.get("wiring"),
                         "outcome": game.get("outcome"),
                         "final": game.get("final"),
                         "analysis": game.get("analysis") or game_log.analyze_game(game),
