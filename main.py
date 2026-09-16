@@ -32,6 +32,7 @@ from urllib.parse import parse_qs, urlparse
 
 import dials as dials_mod
 import game_log
+import cortex
 
 PORT = int(os.environ.get("PORT") or os.environ.get("FS_AVATAR_PORT", "8001"))
 AUTHOR = os.environ.get("FS_AVATAR_AUTHOR", "Walton")
@@ -817,6 +818,21 @@ def decide(game_state: Dict[str, Any]) -> Dict[str, Any]:
     food_abundance = float(orchard["abundance"])
     orchard_smell = float(orchard["smell"])
     smell_target = orchard.get("target")
+    # Cortex: remember rivals + budgeted multi-step plan (before per-move scoring).
+    mem = cortex.remember(game_state, d)
+    food_keys = {_key(f) for f in (board.get("food") or [])}
+    plan = cortex.plan_move_values(
+        board,
+        you,
+        mem,
+        d,
+        flood=_flood,
+        blocked_fn=_blocked,
+        food_set=food_keys,
+    )
+    plan_vals = plan.get("values") or {}
+    plan_meta = plan.get("meta") or {}
+    plan_w = float(d.get("plan_weight", 2.8)) if plan_meta.get("enabled") else 0.0
     if food_target.get("race") and food_target.get("preferred") and smell_target:
         pref = food_target["preferred"]
         smell_target = {
@@ -1010,6 +1026,10 @@ def decide(game_state: Dict[str, Any]) -> Dict[str, Any]:
                 wall_term -= float(d.get("edge_trap_penalty", 6.0))
             elif wall_dist <= 1:
                 wall_term -= float(d.get("near_edge_penalty", 2.0))
+        # Memory: avoid scarred cells + predicted rival heads
+        scar_term = -cortex.scar_penalty(mem, nxt, d)
+        predict_term = -cortex.habit_threat(mem, nxt, board, you, d)
+        plan_term = plan_w * float(plan_vals.get(move, 0.0))
         cone_score = float(cone_next["ratio"])
         danger_score = cell_danger / max_dim
         vel *= 1.0 - 0.45 * aggression
@@ -1085,6 +1105,9 @@ def decide(game_state: Dict[str, Any]) -> Dict[str, Any]:
             scentNext=scent_next,
             scentDelta=scent_delta,
             towardPocket=toward_pocket,
+            planScore=float(plan_vals.get(move, 0.0)),
+            scarPenalty=-scar_term,
+            predictThreat=-predict_term,
             score=(
                 (5.0 - 1.5 * aggression) * danger_score
                 + 1.6 * space_score * space_boost * space_len_w
@@ -1101,6 +1124,9 @@ def decide(game_state: Dict[str, Any]) -> Dict[str, Any]:
                 + lead_bonus
                 + flood_term
                 + wall_term
+                + plan_term
+                + scar_term
+                + predict_term
                 - self_hug
             ),
         )
@@ -1162,6 +1188,9 @@ def decide(game_state: Dict[str, Any]) -> Dict[str, Any]:
         shout = "starving — hunt"
     elif panic:
         shout = "escape cone!"
+    elif plan_meta.get("best_line") and len(plan_meta.get("best_line") or []) >= 2:
+        line = "→".join(plan_meta["best_line"][:4])
+        shout = f"plan {line}"
     elif orchard_smell > 0.55 and not food_target.get("race"):
         shout = "orchard smell — feast"
     elif threat_vetoes_fruit:
@@ -1246,6 +1275,10 @@ def decide(game_state: Dict[str, Any]) -> Dict[str, Any]:
             "behind": behind,
             "len_gap": len_gap,
             "snake_near": snake_near,
+            "plan": plan_meta,
+            "plan_pick": (plan_meta.get("best_line") or [None])[0],
+            "memory_scars": len(mem.scars),
+            "memory_rivals": len(mem.rival_heads),
             "food_gate": food_gate,
             "health": health,
             "starve_urgency": starve_urgency,
@@ -1525,6 +1558,7 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/start":
             gid = (data.get("game") or {}).get("id")
             print("GAME START", gid)
+            cortex.clear(str(gid) if gid else None)
             game_log.on_start(data)
             _clear_frames()
             frame = {
@@ -1542,6 +1576,7 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/end":
             gid = (data.get("game") or {}).get("id")
             print("GAME END", gid)
+            cortex.clear(str(gid) if gid else None)
             finished = game_log.on_end(data)
             analysis = (finished or {}).get("analysis") or {}
             print(

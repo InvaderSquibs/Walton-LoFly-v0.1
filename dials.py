@@ -57,6 +57,16 @@ _DEFAULTS: Dict[str, Any] = {
     "escape_wall_weight": 2.2,
     "edge_trap_penalty": 6.0,
     "near_edge_penalty": 2.0,
+    # Cortex: memory + multi-step plan
+    "plan_enabled": True,
+    "plan_depth": 3,
+    "plan_beam": 3,
+    "plan_budget_ms": 45,
+    "plan_weight": 2.8,
+    "memory_turns": 8,
+    "memory_scar_weight": 1.4,
+    "memory_scar_decay": 0.85,
+    "memory_predict_weight": 2.2,
 }
 
 _cache: Dict[str, Any] = {}
