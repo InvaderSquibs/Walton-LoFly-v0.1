@@ -35,9 +35,9 @@ import game_log
 
 PORT = int(os.environ.get("PORT") or os.environ.get("FS_AVATAR_PORT", "8001"))
 AUTHOR = os.environ.get("FS_AVATAR_AUTHOR", "Walton")
-COLOR = os.environ.get("FS_AVATAR_COLOR", "#f0b429")
-HEAD = os.environ.get("FS_AVATAR_HEAD", "default")
-TAIL = os.environ.get("FS_AVATAR_TAIL", "default")
+COLOR = os.environ.get("FS_AVATAR_COLOR", "#141414")
+HEAD = os.environ.get("FS_AVATAR_HEAD", "bee")
+TAIL = os.environ.get("FS_AVATAR_TAIL", "bee")
 SNAKE_NAME = os.environ.get("FS_AVATAR_NAME", "Walton-LoFly-v0.1")
 
 MOVES = ("up", "down", "left", "right")
