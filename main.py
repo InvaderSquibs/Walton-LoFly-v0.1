@@ -1138,6 +1138,7 @@ class Handler(BaseHTTPRequestHandler):
     def do_GET(self) -> None:  # noqa: N802
         path = urlparse(self.path).path
         if path in ("/", ""):
+            d = dials_mod.load_dials()
             self._json(
                 200,
                 {
@@ -1146,7 +1147,7 @@ class Handler(BaseHTTPRequestHandler):
                     "color": COLOR,
                     "head": HEAD,
                     "tail": TAIL,
-                    "version": "lofly-v0.1",
+                    "version": str(d.get("id") or "lofly-unknown"),
                 },
             )
             return
