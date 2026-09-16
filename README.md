@@ -20,4 +20,13 @@ python main.py
 # → GET http://127.0.0.1:$PORT/
 ```
 
-After policy changes in the fly-brain repo, copy `server.py` → `main.py` and `game_log.py` into this folder, then **republish** on Replit.
+After policy / dial changes in fly-brain, sync into this folder then **republish** on Replit:
+
+```bash
+cp ../server.py main.py
+cp ../game_log.py game_log.py
+cp ../dials.py dials.py
+cp ../ladder/dials/leader.json ladder/dials/leader.json
+```
+
+Leader knobs live in `ladder/dials/leader.json` (loaded automatically).

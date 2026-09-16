@@ -1,7 +1,5 @@
 #!/usr/bin/env python3
 """
-Walton-LoFly-v0.1 — Battlesnake webhook for Replit / local.
-
 FS-Avatar — real Battlesnake webhook (not a stub).
 
 Endpoints (Battlesnake API):
@@ -32,6 +30,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any, Dict, List, Optional, Tuple
 from urllib.parse import parse_qs, urlparse
 
+import dials as dials_mod
 import game_log
 
 PORT = int(os.environ.get("PORT") or os.environ.get("FS_AVATAR_PORT", "8001"))
@@ -187,13 +186,15 @@ def _min_danger(head: Dict[str, int], board: Dict[str, Any], you: Dict[str, Any]
             continue
         for p in snake.get("body") or []:
             best = min(best, _manhattan(head, p))
-    wall = min(
-        head["x"],
-        head["y"],
-        board["width"] - 1 - head["x"],
-        board["height"] - 1 - head["y"],
-    )
-    best = min(best, wall + 0.5)
+    d = dials_mod.load_dials()
+    if d.get("wall_counts_as_danger", True):
+        wall = min(
+            head["x"],
+            head["y"],
+            board["width"] - 1 - head["x"],
+            board["height"] - 1 - head["y"],
+        )
+        best = min(best, wall + 0.5)
     if not math.isfinite(best):
         best = float(max(board["width"], board["height"]))
     return best
@@ -350,34 +351,106 @@ def _food_courtship_targets(
     }
 
 
+def _orchard_scent(board: Dict[str, Any], head: Dict[str, int]) -> Dict[str, Any]:
+    """Proximity-weighted food pockets + attractor cell the snake steers toward."""
+    foods = board.get("food") or []
+    if not foods or not head:
+        return {
+            "foodCount": 0,
+            "abundance": 0.0,
+            "smell": 0.0,
+            "scentHere": 0.0,
+            "target": None,
+            "clusterMass": 0.0,
+        }
+
+    tau = 2.5
+
+    def scent_at(p: Dict[str, int]) -> float:
+        return sum(math.exp(-_manhattan(p, f) / tau) for f in foods)
+
+    best_food = foods[0]
+    best_score = -1e9
+    best_mass = 0.0
+    for f in foods:
+        mass = sum(math.exp(-_manhattan(f, g) / 2.0) for g in foods)
+        score = mass / (1.0 + _manhattan(head, f))
+        if score > best_score:
+            best_score = score
+            best_food = f
+            best_mass = mass
+
+    wx = wy = wsum = 0.0
+    for f in foods:
+        d = _manhattan(best_food, f)
+        if d > 4:
+            continue
+        w = math.exp(-d / 2.0)
+        wx += w * f["x"]
+        wy += w * f["y"]
+        wsum += w
+    target = (
+        {"x": int(round(wx / wsum)), "y": int(round(wy / wsum))}
+        if wsum > 0
+        else {"x": best_food["x"], "y": best_food["y"]}
+    )
+
+    scent_here = scent_at(head)
+    abundance = max(0.0, min(1.0, 1.0 - math.exp(-len(foods) / 2.2)))
+    smell = max(
+        0.0,
+        min(
+            1.0,
+            0.4 * abundance
+            + 0.6 * min(1.0, scent_here / max(1.2, len(foods) * 0.45)),
+        ),
+    )
+    return {
+        "foodCount": len(foods),
+        "abundance": abundance,
+        "smell": smell,
+        "scentHere": scent_here,
+        "target": target,
+        "clusterMass": best_mass,
+        "scent_at": scent_at,
+    }
+
+
 def _food_race_or_yield(
     board: Dict[str, Any], you: Dict[str, Any], head: Dict[str, int], size: Dict[str, Any]
 ) -> Dict[str, Any]:
-    """Race fruit when bigger (H2H win / first arrival); yield to exclusive when smaller."""
+    """Race only with a real length lead + uncontested fruit; no equal-length race_force."""
     base = _food_courtship_targets(board, you, head)
     ranked = base.get("ranked") or []
     if not ranked:
         out = dict(base)
         out.update(mode="none", race=False)
         return out
-    can_race = bool(size.get("longest") or size.get("size_advantage", 0) >= 0.55 or size.get("size_lead", 0) > 0)
+    can_race = (
+        int(size.get("length_you") or 0) > int(size.get("length_max_rival") or 0)
+        and (float(size.get("size_advantage") or 0) >= 0.55 or float(size.get("size_lead") or 0) > 0)
+    )
     if can_race:
         raceable = sorted(
             [r for r in ranked if r["rivalsCloser"] < 1],
             key=lambda r: (r["myDist"], -r["exclusivity"]),
         )
-        pick = raceable[0] if raceable else min(ranked, key=lambda r: r["myDist"])
-        return {
-            "preferred": pick["food"],
-            "exclusivity": pick["exclusivity"],
-            "contested": pick["contest"] >= 1.0,
-            "myDist": pick["myDist"],
-            "rivalsCloser": pick["rivalsCloser"],
-            "rivalsHeading": pick["rivalsHeading"],
-            "ranked": ranked,
-            "mode": "race" if raceable else "race_force",
-            "race": True,
-        }
+        if raceable:
+            pick = raceable[0]
+            return {
+                "preferred": pick["food"],
+                "exclusivity": pick["exclusivity"],
+                "contested": pick["contest"] >= 1.0,
+                "myDist": pick["myDist"],
+                "rivalsCloser": pick["rivalsCloser"],
+                "rivalsHeading": pick["rivalsHeading"],
+                "ranked": ranked,
+                "mode": "race",
+                "race": True,
+            }
+        out = dict(base)
+        out.update(mode="yield_contested", race=False)
+        return out
     out = dict(base)
     out.update(mode="yield", race=False)
     return out
@@ -561,7 +634,8 @@ def decide(game_state: Dict[str, Any]) -> Dict[str, Any]:
         * (0.4 + 0.35 * food_target["exclusivity"] + 0.25 * here_entropy["entropy"])
     )
     aggression = 0.5 + 0.5 * size["size_advantage"]
-    # wiring: retina_sectors_v1 — race/yield + directional eye sectors
+    # wiring from dials — spatial scent pocket + attractor
+    d = dials_mod.load_dials()
     health = float(you.get("health", 100))
     starve_urgency = max(0.0, min(1.0, (55.0 - health) / 55.0))
     food_dist_now = (
@@ -569,22 +643,50 @@ def decide(game_state: Dict[str, Any]) -> Dict[str, Any]:
         if food_target["myDist"] is not None
         else _nearest_food(head, board.get("food") or [])
     )
-    panic = (safety < 0.18 or danger_now <= 1.0) and starve_urgency < 0.55
+    panic = (
+        safety < float(d["panic_safety_thresh"]) or danger_now <= float(d["panic_danger_thresh"])
+    ) and starve_urgency < float(d["starve_blocks_panic_above"])
     undersized = size["size_advantage"] < 0.5
     dominant = size["size_advantage"] >= 0.55 or bool(size.get("longest"))
+    orchard = _orchard_scent(board, head)
+    food_count = int(orchard["foodCount"])
+    food_abundance = float(orchard["abundance"])
+    orchard_smell = float(orchard["smell"])
+    smell_target = orchard.get("target")
+    if food_target.get("race") and food_target.get("preferred") and smell_target:
+        pref = food_target["preferred"]
+        smell_target = {
+            "x": int(round(0.55 * pref["x"] + 0.45 * smell_target["x"])),
+            "y": int(round(0.55 * pref["y"] + 0.45 * smell_target["y"])),
+        }
+    elif food_target.get("preferred") and not smell_target:
+        smell_target = food_target["preferred"]
     food_gate = 1.0
     if panic:
-        food_gate *= 0.4
+        food_gate *= float(d["panic_food_gate"])
     elif food_target.get("race"):
-        food_gate *= 1.35
+        food_gate *= float(d["race_food_gate"])
     elif undersized:
-        food_gate *= 0.85
+        food_gate *= float(d["undersized_food_gate"])
     if starve_urgency > 0.35 or (
         food_dist_now is not None and food_dist_now <= 2 and danger_now > 1.5
     ):
         food_gate = max(food_gate, 0.7 + 0.45 * starve_urgency)
     if not panic and not food_target.get("race") and food_target["exclusivity"] > 0.65:
-        food_gate = max(food_gate, 1.05)
+        food_gate = max(food_gate, 1.25)
+    if (
+        not food_target.get("race")
+        and food_dist_now is not None
+        and food_dist_now <= 2
+        and food_target.get("rivalsCloser", 1) < 1
+        and danger_now > 1
+    ):
+        food_gate = max(food_gate, float(d["exclusive_near_boost"]))
+    if not panic and orchard_smell > 0.35:
+        food_gate = max(food_gate, 1.0 + 0.7 * orchard_smell)
+    if starve_urgency > 0.45:
+        food_gate = max(food_gate, 1.15 + 0.5 * orchard_smell)
+    smell_boost = 1.0 if panic else 1.0 + 0.85 * orchard_smell
     cone_boost = 1.7 if panic else (1.25 if undersized else 1.0)
     space_boost = 1.35 if panic else (1.15 if undersized else 1.0)
 
@@ -632,19 +734,27 @@ def decide(game_state: Dict[str, Any]) -> Dict[str, Any]:
         food_pull = 0.0 if food_dist is None else 1.0 / (1.0 + food_dist)
         vel_threat = _velocity_threat(nxt, board, you)
         if food_target.get("race"):
-            vel_threat *= 0.55
+            vel_threat *= 0.85
         vel = -vel_threat
         cell_danger = _min_danger(nxt, board, you)
+        fruit_hard = cell_danger <= float(d["fruit_hard_danger"])
+        fruit_soft = (not fruit_hard) and (
+            cell_danger <= float(d["fruit_soft_danger"]) or sec["threat"] > 0.5
+        )
+        fruit_scale = 0.0 if fruit_hard else (float(d["fruit_soft_scale"]) if fruit_soft else 1.0)
         food_w = (
             0.7
             + 1.1 * hunger
             + 0.2 * courtship
             + 0.35 * size["size_advantage"]
             + 0.6 * starve_urgency
+            + 0.55 * orchard_smell
             + (0.7 if food_target.get("race") else 0.4 * food_target["exclusivity"])
         )
         food_score = (
-            food_pull
+            fruit_scale
+            * smell_boost
+            * food_pull
             * food_w
             * (0.75 + 0.25 * safety)
             * food_gate
@@ -657,12 +767,46 @@ def decide(game_state: Dict[str, Any]) -> Dict[str, Any]:
         vel *= 1.0 - 0.45 * aggression
         lead_bonus = 0.6 * size["size_lead"] * food_pull if (dominant and not panic) else 0.0
         excl_term = 2.5 if food_target.get("race") else 1.5 * food_target["exclusivity"]
-        threat_w = (0.45 if (dominant and food_target.get("race")) else 1.0) * 3.2
+        threat_w = (0.75 if (dominant and food_target.get("race")) else 1.0) * 3.2
+        fruit_term = fruit_scale * smell_boost * 2.2 * sec["fruit"] * food_gate
         retina_prefer = (
             2.0 * sec["open"]
-            + 2.2 * sec["fruit"] * food_gate
+            + fruit_term
             - threat_w * sec["threat"]
             + 1.6 * sec["entropy"]
+        )
+        exclusive_snack = (
+            not food_target.get("race")
+            and food_dist_now is not None
+            and food_dist_now <= 2
+            and food_target.get("rivalsCloser", 1) < 1
+            and food_target["exclusivity"] > 0.6
+        )
+        bite_override = bool(d.get("bite_override_panic", True)) and exclusive_snack
+        if panic and not bite_override:
+            panic_open = 3.5 * sec["open"] + 0.05 * float(cone_next["empty"])
+        elif panic:
+            panic_open = 1.2 * sec["open"]
+        else:
+            panic_open = 0.0
+        scent_fn = orchard.get("scent_at")
+        scent_next = float(scent_fn(nxt)) if callable(scent_fn) else 0.0
+        scent_delta = scent_next - float(orchard.get("scentHere") or 0.0)
+        if smell_target is not None:
+            dist_head = _manhattan(head, smell_target)
+            dist_next = _manhattan(nxt, smell_target)
+            toward_pocket = 1.0 / (1.0 + dist_next) - 1.0 / (1.0 + dist_head)
+        else:
+            toward_pocket = 0.0
+        scent_prefer = (
+            (float(d["smell_panic_dampen"]) if panic else 1.0)
+            * smell_boost
+            * fruit_scale
+            * (
+                2.8 * max(0.0, scent_delta)
+                + 2.2 * max(0.0, toward_pocket)
+                + 0.55 * scent_next
+            )
         )
         row.update(
             space=space,
@@ -673,12 +817,20 @@ def decide(game_state: Dict[str, Any]) -> Dict[str, Any]:
             retinaFruit=sec["fruit"],
             retinaThreat=sec["threat"],
             sectorEntropy=sec["entropy"],
+            fruitHard=fruit_hard,
+            fruitSoft=fruit_soft,
+            fruitScale=fruit_scale,
+            scentNext=scent_next,
+            scentDelta=scent_delta,
+            towardPocket=toward_pocket,
             score=(
                 (5.0 - 1.5 * aggression) * danger_score
                 + 1.6 * space_score * space_boost
                 + 2.4 * cone_score * cone_boost
                 + 2.8 * ent_next["entropy"]
                 + retina_prefer
+                + scent_prefer
+                + panic_open
                 + 1.3 * vel
                 + (7.5 + 3.0 * hunger + 2.5 * starve_urgency + excl_term) * food_score
                 + 0.45 * courtship * space_score
@@ -705,6 +857,8 @@ def decide(game_state: Dict[str, Any]) -> Dict[str, Any]:
         shout = "starving — hunt"
     elif panic:
         shout = "escape cone!"
+    elif orchard_smell > 0.55 and not food_target.get("race"):
+        shout = "orchard smell — feast"
     elif threat_vetoes_fruit:
         shout = "eyes say danger"
     elif open_wins and not food_target.get("race"):
@@ -741,6 +895,7 @@ def decide(game_state: Dict[str, Any]) -> Dict[str, Any]:
             + 0.2 * courtship
             + 0.25 * size["size_advantage"]
             + 0.45 * starve_urgency
+            + 0.55 * orchard_smell
             + (0.45 if food_target.get("race") else 0.25 * food_target["exclusivity"])
             + (0.15 if food_in_cone else 0.0)
             + 0.35 * here_sectors["fruit"]
@@ -754,7 +909,7 @@ def decide(game_state: Dict[str, Any]) -> Dict[str, Any]:
         "DAN_risk": (
             max(size["size_advantage"], 0.7)
             if food_target.get("race")
-            else size["size_advantage"] * (0.3 if panic else 1.0)
+            else size["size_advantage"] * (0.3 if panic else 1.0) * (1.0 + 0.3 * orchard_smell)
         ),
         "aSPIC": size["size_lead"],
         "KC_escape": 0.85 if panic else max(0.0, 1.0 - safety) * 0.35 + 0.4 * here_sectors["threat"],
@@ -785,6 +940,13 @@ def decide(game_state: Dict[str, Any]) -> Dict[str, Any]:
             "health": health,
             "starve_urgency": starve_urgency,
             "food_in_cone": food_in_cone,
+            "food_count": food_count,
+            "food_abundance": food_abundance,
+            "orchard_smell": orchard_smell,
+            "smell_boost": smell_boost,
+            "smell_target": smell_target,
+            "scent_here": orchard.get("scentHere"),
+            "cluster_mass": orchard.get("clusterMass"),
             "food_exclusivity": food_target["exclusivity"],
             "food_contested": food_target["contested"],
             "food_rivals_closer": food_target["rivalsCloser"],
@@ -799,7 +961,8 @@ def decide(game_state: Dict[str, Any]) -> Dict[str, Any]:
             "retina_fruit": here_sectors["fruit"],
             "retina_threat": here_sectors["threat"],
             "sector_entropy": eyes_entropy,
-            "wiring": "retina_sectors_v1",
+            "wiring": d.get("wiring") or "retina_sectors_v1_orchard",
+            "dials_id": d.get("id"),
             "neuron_targets": neuron_targets,
         },
     }
@@ -838,6 +1001,7 @@ def _start_play(body: Dict[str, Any]) -> Dict[str, Any]:
     height = int(body.get("height") or 11)
     gametype = str(body.get("gametype") or "solo")
     delay = int(body.get("delay") or 120)
+    seed = body.get("seed")
     url = f"http://127.0.0.1:{PORT}"
     name = str(body.get("name") or SNAKE_NAME)
 
@@ -884,10 +1048,18 @@ def _start_play(body: Dict[str, Any]) -> Dict[str, Any]:
         str(delay),
         "-v",
     ]
+    if seed is not None and str(seed).strip() != "":
+        cmd.extend(["--seed", str(int(seed))])
     for o in opponents:
         cmd.extend(["--name", o["name"], "--url", o["url"]])
 
-    _set_last(phase="playing", play={"cmd": cmd, "started_at": time.time(), "opponents": opponents})
+    play_meta = {
+        "cmd": cmd,
+        "started_at": time.time(),
+        "opponents": opponents,
+        "seed": int(seed) if seed is not None and str(seed).strip() != "" else None,
+    }
+    _set_last(phase="playing", play=play_meta)
     _play_proc = subprocess.Popen(
         cmd,
         stdout=subprocess.PIPE,
@@ -906,6 +1078,7 @@ def _start_play(body: Dict[str, Any]) -> Dict[str, Any]:
                 "finished_at": time.time(),
                 "log_tail": (out or "")[-4000:],
                 "opponents": opponents,
+                "seed": play_meta.get("seed"),
             },
         )
 
@@ -918,6 +1091,7 @@ def _start_play(body: Dict[str, Any]) -> Dict[str, Any]:
         "name": name,
         "opponents": opponents,
         "gametype": gametype,
+        "seed": play_meta.get("seed"),
     }
 
 
@@ -965,6 +1139,7 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/dev/status":
             cli = _find_battlesnake()
             running = _play_proc is not None and _play_proc.poll() is None
+            d = dials_mod.load_dials()
             self._json(
                 200,
                 {
@@ -978,6 +1153,9 @@ class Handler(BaseHTTPRequestHandler):
                     "frames_pending": _frames_pending(),
                     "games_logged": len(game_log.list_games(50)),
                     "log_dir": str(game_log.LOG_DIR),
+                    "dials_id": d.get("id"),
+                    "dials_path": str(dials_mod.dials_path() or "(defaults)"),
+                    "wiring": d.get("wiring"),
                 },
             )
             return
@@ -1116,8 +1294,10 @@ class Handler(BaseHTTPRequestHandler):
 def main() -> None:
     server = ThreadingHTTPServer(("0.0.0.0", PORT), Handler)
     cli = _find_battlesnake()
+    d = dials_mod.load_dials()
     print(f"FS-Avatar Battlesnake on http://0.0.0.0:{PORT}")
     print(f"  identity: {SNAKE_NAME} (author={AUTHOR}, color={COLOR})")
+    print(f"  dials: {d.get('id')} ← {dials_mod.dials_path() or '(defaults)'}")
     print(f"  battlesnake CLI: {cli or 'NOT FOUND — install to use /dev/play'}")
     print("  console helpers: GET /dev/status  GET /dev/last  GET /dev/frames  GET /dev/games  GET /dev/game/latest?summary=1  GET /dev/batch  POST /dev/play")
     print(f"  game logs: {game_log.LOG_DIR}")
