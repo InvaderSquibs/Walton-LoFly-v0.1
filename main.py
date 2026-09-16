@@ -1136,8 +1136,8 @@ def decide(game_state: Dict[str, Any]) -> Dict[str, Any]:
                 else 0,
                 s.get("followSpace") or 0,
                 s.get("space") or 0,
-                s.get("wallDist") or 0,
                 s["score"],
+                s.get("wallDist") or 0,
             ),
             reverse=True,
         )
