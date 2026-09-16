@@ -32,6 +32,12 @@ _DEFAULTS: Dict[str, Any] = {
     "equal_or_longer_head_threat": 6.5,
     "shorter_head_threat": 0.35,
     "race_threat_soften": 1.0,
+    "food_cell_commits_bite": True,
+    "bite_commit_boost": 1.75,
+    "smell_min_scale": 0.6,
+    "pocket_fit_margin": 3,
+    "long_body_space_weight": 1.4,
+    "tight_pocket_penalty": 0.12,
 }
 
 _cache: Dict[str, Any] = {}

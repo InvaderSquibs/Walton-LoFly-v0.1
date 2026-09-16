@@ -179,13 +179,21 @@ def _nearest_food(head: Dict[str, int], food: List[Dict[str, int]]) -> Optional[
     return min(_manhattan(head, f) for f in food)
 
 
-def _min_danger(head: Dict[str, int], board: Dict[str, Any], you: Dict[str, Any]) -> float:
+def _min_snake_danger(head: Dict[str, int], board: Dict[str, Any], you: Dict[str, Any]) -> float:
+    """Distance to rival bodies/heads only — food should smell, not 'see' walls as fruit veto."""
     best = float("inf")
     for snake in board.get("snakes") or []:
         if snake.get("id") == you.get("id"):
             continue
         for p in snake.get("body") or []:
             best = min(best, _manhattan(head, p))
+    if not math.isfinite(best):
+        best = float(max(board["width"], board["height"]))
+    return best
+
+
+def _min_danger(head: Dict[str, int], board: Dict[str, Any], you: Dict[str, Any]) -> float:
+    best = _min_snake_danger(head, board, you)
     d = dials_mod.load_dials()
     if d.get("wall_counts_as_danger", True):
         wall = min(
@@ -751,11 +759,34 @@ def decide(game_state: Dict[str, Any]) -> Dict[str, Any]:
             vel_threat *= float(d.get("race_threat_soften", 0.85))
         vel = -vel_threat
         cell_danger = _min_danger(nxt, board, you)
-        fruit_hard = cell_danger <= float(d["fruit_hard_danger"])
+        snake_danger = _min_snake_danger(nxt, board, you)
+        foods = board.get("food") or []
+        on_food = any(_key(nxt) == _key(f) for f in foods)
+        # Fruit veto uses SNAKE danger only — walls must not make food look like a wall
+        fruit_hard = snake_danger <= float(d["fruit_hard_danger"])
         fruit_soft = (not fruit_hard) and (
-            cell_danger <= float(d["fruit_soft_danger"]) or sec["threat"] > 0.5
+            snake_danger <= float(d["fruit_soft_danger"]) or sec["threat"] > 0.5
         )
         fruit_scale = 0.0 if fruit_hard else (float(d["fruit_soft_scale"]) if fruit_soft else 1.0)
+        # Commit the bite: stepping onto food is smell→eat, not a visual hard veto
+        if on_food and bool(d.get("food_cell_commits_bite", True)):
+            # Still refuse if an equal/longer head is adjacent (real H2H on the berry)
+            head_adj_eq = False
+            my_len = you.get("length") or len(you.get("body") or [])
+            for snake in board.get("snakes") or []:
+                if snake.get("id") == you.get("id"):
+                    continue
+                sh = snake.get("head") or (snake.get("body") or [None])[0]
+                if not sh:
+                    continue
+                their = snake.get("length") or len(snake.get("body") or [])
+                if _manhattan(nxt, sh) == 1 and their >= my_len:
+                    head_adj_eq = True
+                    break
+            if not head_adj_eq:
+                fruit_hard = False
+                fruit_soft = False
+                fruit_scale = 1.0
         food_w = (
             0.7
             + 1.1 * hunger
@@ -775,7 +806,18 @@ def decide(game_state: Dict[str, Any]) -> Dict[str, Any]:
             * (1.15 if food_in_cone else 1.0)
             * (1.2 if food_target.get("race") else (0.75 + 0.45 * food_target["exclusivity"]))
         )
+        if on_food and not fruit_hard:
+            food_score *= float(d.get("bite_commit_boost", 1.6))
+        my_len_i = int(you.get("length") or len(you.get("body") or []) or 1)
         space_score = space / float(board["width"] * board["height"])
+        # Late-game: refuse / heavily penalize pockets that can't fit our body
+        fit_margin = int(d.get("pocket_fit_margin", 2) or 0)
+        pocket_ok = space >= (my_len_i + fit_margin)
+        space_len_w = 1.0 + float(d.get("long_body_space_weight", 0.0)) * min(
+            1.0, max(0.0, (my_len_i - 8) / 20.0)
+        )
+        if not pocket_ok:
+            space_score *= float(d.get("tight_pocket_penalty", 0.15))
         cone_score = float(cone_next["ratio"])
         danger_score = cell_danger / max_dim
         vel *= 1.0 - 0.45 * aggression
@@ -796,7 +838,7 @@ def decide(game_state: Dict[str, Any]) -> Dict[str, Any]:
             and food_target.get("rivalsCloser", 1) < 1
             and food_target["exclusivity"] > 0.6
         )
-        bite_override = bool(d.get("bite_override_panic", True)) and exclusive_snack
+        bite_override = bool(d.get("bite_override_panic", True)) and (exclusive_snack or on_food)
         if panic and not bite_override:
             panic_open = 3.5 * sec["open"] + 0.05 * float(cone_next["empty"])
         elif panic:
@@ -812,10 +854,14 @@ def decide(game_state: Dict[str, Any]) -> Dict[str, Any]:
             toward_pocket = 1.0 / (1.0 + dist_next) - 1.0 / (1.0 + dist_head)
         else:
             toward_pocket = 0.0
+        # Smell is not blocked by wall-as-fruit-hard — only dampened by real snake danger
+        smell_scale = 1.0 if (on_food and not fruit_hard) else max(fruit_scale, float(d.get("smell_min_scale", 0.55)))
+        if fruit_hard and not on_food:
+            smell_scale = float(d.get("smell_min_scale", 0.55))
         scent_prefer = (
             (float(d["smell_panic_dampen"]) if panic else 1.0)
             * smell_boost
-            * fruit_scale
+            * smell_scale
             * (
                 2.8 * max(0.0, scent_delta)
                 + 2.2 * max(0.0, toward_pocket)
@@ -834,12 +880,15 @@ def decide(game_state: Dict[str, Any]) -> Dict[str, Any]:
             fruitHard=fruit_hard,
             fruitSoft=fruit_soft,
             fruitScale=fruit_scale,
+            onFood=on_food,
+            snakeDanger=snake_danger,
+            pocketOk=pocket_ok,
             scentNext=scent_next,
             scentDelta=scent_delta,
             towardPocket=toward_pocket,
             score=(
                 (5.0 - 1.5 * aggression) * danger_score
-                + 1.6 * space_score * space_boost
+                + 1.6 * space_score * space_boost * space_len_w
                 + 2.4 * cone_score * cone_boost
                 + 2.8 * ent_next["entropy"]
                 + retina_prefer
