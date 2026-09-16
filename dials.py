@@ -40,7 +40,10 @@ _DEFAULTS: Dict[str, Any] = {
     "smell_min_scale": 0.6,
     "pocket_fit_margin": 5,
     "long_body_space_weight": 2.2,
-    "tight_pocket_penalty": 0.04,
+    "tight_pocket_penalty": 0.03,
+    "food_requires_pocket_fit": True,
+    "food_pocket_starve_override": 0.7,
+    "self_hug_penalty": 2.0,
 }
 
 _cache: Dict[str, Any] = {}

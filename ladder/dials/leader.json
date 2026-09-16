@@ -1,8 +1,8 @@
 {
-  "id": "leader-v0.4-calm-catchup",
+  "id": "leader-v0.5-true-flood",
   "wiring": "retina_sectors_v1_orchard",
-  "notes": "Rung4 SmartyTree 0/3: panic OR(danger<=1) locked escape 60%+; never size-dom; late self-trap. Calm panic (cone+snake AND / tunnel), catch-up food when behind, harder pocket filter.",
-  "parent_id": "leader-v0.3-bite-smell",
+  "notes": "Playtest: size-dominant deaths were self-collisions. Flood treated current head as empty \u2192 pocket overcount. Fix: post-move blocked keeps neck, tip frees only if not growing; food pocket veto; self-hug penalty.",
+  "parent_id": "leader-v0.4-calm-catchup",
   "panic_food_gate": 0.8,
   "panic_safety_thresh": 0.18,
   "panic_danger_thresh": 1.0,
@@ -29,6 +29,9 @@
   "bite_commit_boost": 1.75,
   "smell_min_scale": 0.6,
   "pocket_fit_margin": 5,
-  "long_body_space_weight": 2.2,
-  "tight_pocket_penalty": 0.04
+  "long_body_space_weight": 2.4,
+  "tight_pocket_penalty": 0.03,
+  "food_requires_pocket_fit": true,
+  "food_pocket_starve_override": 0.7,
+  "self_hug_penalty": 2.0
 }

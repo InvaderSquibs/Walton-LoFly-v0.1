@@ -154,6 +154,48 @@ def _blocked(board: Dict[str, Any], you: Dict[str, Any]) -> set:
     return blocked
 
 
+def _blocked_after_move(
+    board: Dict[str, Any],
+    you: Dict[str, Any],
+    nxt: Dict[str, int],
+    grow: bool,
+) -> set:
+    """Occupied cells after we step to nxt. Current head stays filled (becomes neck).
+    Own tip frees only when we are not growing — critical for pocket flood accuracy.
+    """
+    blocked: set = set()
+    you_id = you.get("id")
+    for snake in board.get("snakes") or []:
+        body = snake.get("body") or []
+        if not body:
+            continue
+        if snake.get("id") == you_id:
+            # Keep every segment including head; drop tip only if not growing.
+            last = len(body) if grow or len(body) <= 1 else len(body) - 1
+            for i in range(last):
+                blocked.add(_key(body[i]))
+        else:
+            for p in body:
+                blocked.add(_key(p))
+    for h in board.get("hazards") or []:
+        blocked.add(_key(h))
+    # Destination is vacated for flood start.
+    blocked.discard(_key(nxt))
+    return blocked
+
+
+def _min_self_body_dist(cell: Dict[str, int], you: Dict[str, Any], skip_tip: bool = True) -> float:
+    """Distance to own body (not head). Used to penalize hugging our coil."""
+    body = you.get("body") or []
+    if len(body) < 2:
+        return float("inf")
+    end = len(body) - 1 if skip_tip and len(body) > 1 else len(body)
+    best = float("inf")
+    for i in range(1, end):  # skip head at 0
+        best = min(best, _manhattan(cell, body[i]))
+    return best if math.isfinite(best) else float("inf")
+
+
 def _flood(board: Dict[str, Any], start: Dict[str, int], blocked: set) -> int:
     if not _in_bounds(board, start) or _key(start) in blocked:
         return 0
@@ -756,9 +798,13 @@ def decide(game_state: Dict[str, Any]) -> Dict[str, Any]:
             scored.append(row)
             continue
 
-        space = _flood(board, nxt, blocked)
-        cone_next = _forward_cone_empty(board, nxt, move, blocked)
-        ent_next = _region_entropy(board, nxt, move, blocked)
+        foods = board.get("food") or []
+        on_food = any(_key(nxt) == _key(f) for f in foods)
+        # Accurate 1-ply occupancy: head stays (neck), tip frees only if not eating.
+        blocked_next = _blocked_after_move(board, you, nxt, grow=on_food)
+        space = _flood(board, nxt, blocked_next)
+        cone_next = _forward_cone_empty(board, nxt, move, blocked_next)
+        ent_next = _region_entropy(board, nxt, move, blocked_next)
         you_next = {"id": you.get("id"), "length": you.get("length"), "body": you.get("body"), "head": nxt}
         sec = _sample_sectors(_build_retina(board, you_next, move))
         if preferred:
@@ -772,8 +818,7 @@ def decide(game_state: Dict[str, Any]) -> Dict[str, Any]:
         vel = -vel_threat
         cell_danger = _min_danger(nxt, board, you)
         snake_danger = _min_snake_danger(nxt, board, you)
-        foods = board.get("food") or []
-        on_food = any(_key(nxt) == _key(f) for f in foods)
+        self_near = _min_self_body_dist(nxt, you, skip_tip=not on_food)
         # Fruit veto uses SNAKE danger only — walls must not make food look like a wall
         fruit_hard = snake_danger <= float(d["fruit_hard_danger"])
         fruit_soft = (not fruit_hard) and (
@@ -821,15 +866,32 @@ def decide(game_state: Dict[str, Any]) -> Dict[str, Any]:
         if on_food and not fruit_hard:
             food_score *= float(d.get("bite_commit_boost", 1.6))
         my_len_i = int(you.get("length") or len(you.get("body") or []) or 1)
+        next_len = my_len_i + (1 if on_food else 0)
         space_score = space / float(board["width"] * board["height"])
         # Late-game: refuse / heavily penalize pockets that can't fit our body
         fit_margin = int(d.get("pocket_fit_margin", 2) or 0)
-        pocket_ok = space >= (my_len_i + fit_margin)
+        pocket_ok = space >= (next_len + fit_margin)
+        # Biting into a pocket that can't fit the grown body — veto unless starving.
+        food_pocket_veto = bool(
+            on_food
+            and bool(d.get("food_requires_pocket_fit", True))
+            and not pocket_ok
+            and starve_urgency < float(d.get("food_pocket_starve_override", 0.7))
+        )
+        if food_pocket_veto:
+            food_score *= 0.02
         space_len_w = 1.0 + float(d.get("long_body_space_weight", 0.0)) * min(
-            1.0, max(0.0, (my_len_i - 8) / 20.0)
+            1.0, max(0.0, (next_len - 8) / 20.0)
         )
         if not pocket_ok:
             space_score *= float(d.get("tight_pocket_penalty", 0.15))
+        # Hug own coil less as we lengthen (self-collision precursor).
+        self_hug_w = float(d.get("self_hug_penalty", 1.8)) * min(1.0, max(0.0, (next_len - 10) / 12.0))
+        self_hug = 0.0
+        if math.isfinite(self_near) and self_near <= 1:
+            self_hug = self_hug_w * (1.2 if self_near <= 0 else 1.0)
+        elif math.isfinite(self_near) and self_near <= 2:
+            self_hug = 0.35 * self_hug_w
         cone_score = float(cone_next["ratio"])
         danger_score = cell_danger / max_dim
         vel *= 1.0 - 0.45 * aggression
@@ -895,6 +957,8 @@ def decide(game_state: Dict[str, Any]) -> Dict[str, Any]:
             onFood=on_food,
             snakeDanger=snake_danger,
             pocketOk=pocket_ok,
+            foodPocketVeto=food_pocket_veto,
+            selfNear=self_near if math.isfinite(self_near) else None,
             scentNext=scent_next,
             scentDelta=scent_delta,
             towardPocket=toward_pocket,
@@ -910,6 +974,7 @@ def decide(game_state: Dict[str, Any]) -> Dict[str, Any]:
                 + (7.5 + 3.0 * hunger + 2.5 * starve_urgency + excl_term) * food_score
                 + 0.45 * courtship * space_score
                 + lead_bonus
+                - self_hug
             ),
         )
         scored.append(row)
@@ -919,7 +984,11 @@ def decide(game_state: Dict[str, Any]) -> Dict[str, Any]:
     fitting = [s for s in legal if s.get("pocketOk", True)]
     if fitting:
         legal = fitting
-    legal.sort(key=lambda s: s["score"], reverse=True)
+    # Prefer not biting into unfittable pockets when any other legal move exists.
+    non_food_trap = [s for s in legal if not s.get("foodPocketVeto")]
+    if non_food_trap:
+        legal = non_food_trap
+    legal.sort(key=lambda s: (s["score"], s.get("space") or 0), reverse=True)
     pick = legal[0]["move"] if legal else OPPOSITE.get(neck or "up", "up")
     pick_sec = legal[0] if legal else None
     eyes_open = pick_sec["retinaOpen"] if pick_sec and "retinaOpen" in pick_sec else here_sectors["open"]
