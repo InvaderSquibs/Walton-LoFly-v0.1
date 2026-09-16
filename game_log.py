@@ -10,7 +10,10 @@ import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-LOG_DIR = Path(__file__).resolve().parent / "logs"
+LOG_DIR = Path(
+    os.environ.get("FS_AVATAR_LOG_DIR")
+    or (Path(__file__).resolve().parent / "logs")
+).expanduser().resolve()
 _lock = threading.Lock()
 _active: Dict[str, Any] = {}  # game_id -> in-memory accumulator
 
