@@ -25,6 +25,13 @@ _DEFAULTS: Dict[str, Any] = {
     "exclusive_near_boost": 1.15,
     "smell_panic_dampen": 0.35,
     "bite_override_panic": True,
+    # Early H2H yield (climb handoff: mutual heads ≤ turn 14)
+    "early_game_turns": 18,
+    "early_aggression_cap": 0.4,
+    "early_food_gate_scale": 0.65,
+    "equal_or_longer_head_threat": 6.5,
+    "shorter_head_threat": 0.35,
+    "race_threat_soften": 1.0,
 }
 
 _cache: Dict[str, Any] = {}

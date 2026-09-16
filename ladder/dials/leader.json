@@ -1,7 +1,8 @@
 {
-  "id": "leader-v0.1-orchard",
+  "id": "leader-v0.2-early-h2h",
   "wiring": "retina_sectors_v1_orchard",
-  "notes": "Baseline after orchard scent + racegate food retune",
+  "notes": "Climb handoff: yield equal-length H2H in first ~18 turns (Hungry Bot mutual heads)",
+  "parent_id": "leader-v0.1-orchard",
   "panic_food_gate": 0.4,
   "panic_safety_thresh": 0.25,
   "panic_danger_thresh": 1.0,
@@ -11,8 +12,14 @@
   "fruit_soft_scale": 0.4,
   "wall_counts_as_danger": true,
   "undersized_food_gate": 0.85,
-  "race_food_gate": 1.35,
+  "race_food_gate": 1.25,
   "exclusive_near_boost": 1.15,
   "smell_panic_dampen": 0.35,
-  "bite_override_panic": true
+  "bite_override_panic": true,
+  "early_game_turns": 18,
+  "early_aggression_cap": 0.4,
+  "early_food_gate_scale": 0.65,
+  "equal_or_longer_head_threat": 6.5,
+  "shorter_head_threat": 0.35,
+  "race_threat_soften": 1.0
 }

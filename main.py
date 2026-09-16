@@ -200,9 +200,17 @@ def _min_danger(head: Dict[str, int], board: Dict[str, Any], you: Dict[str, Any]
     return best
 
 
-def _velocity_threat(cell: Dict[str, int], board: Dict[str, Any], you: Dict[str, Any]) -> float:
+def _velocity_threat(
+    cell: Dict[str, int],
+    board: Dict[str, Any],
+    you: Dict[str, Any],
+    dials: Optional[Dict[str, Any]] = None,
+) -> float:
+    d = dials or dials_mod.load_dials()
     threat = 0.0
     my_len = you.get("length") or len(you.get("body") or [])
+    eq_threat = float(d.get("equal_or_longer_head_threat", 4.0))
+    short_threat = float(d.get("shorter_head_threat", 0.4))
     for snake in board.get("snakes") or []:
         if snake.get("id") == you.get("id"):
             continue
@@ -218,7 +226,7 @@ def _velocity_threat(cell: Dict[str, int], board: Dict[str, Any], you: Dict[str,
                 threat += 1.2
         if _manhattan(head, cell) == 1:
             their = snake.get("length") or len(snake.get("body") or [])
-            threat += 4.0 if their >= my_len else 0.4
+            threat += eq_threat if their >= my_len else short_threat
     return threat
 
 
@@ -633,9 +641,13 @@ def decide(game_state: Dict[str, Any]) -> Dict[str, Any]:
         * (0.35 + 0.3 * min(1.0, danger_now / (max_dim * 0.4)))
         * (0.4 + 0.35 * food_target["exclusivity"] + 0.25 * here_entropy["entropy"])
     )
-    aggression = 0.5 + 0.5 * size["size_advantage"]
-    # wiring from dials — spatial scent pocket + attractor
     d = dials_mod.load_dials()
+    aggression = 0.5 + 0.5 * size["size_advantage"]
+    turn = int(game_state.get("turn") or 0)
+    early = turn < int(d.get("early_game_turns", 0) or 0)
+    if early:
+        aggression = min(aggression, float(d.get("early_aggression_cap", aggression)))
+    # wiring from dials — spatial scent pocket + attractor
     health = float(you.get("health", 100))
     starve_urgency = max(0.0, min(1.0, (55.0 - health) / 55.0))
     food_dist_now = (
@@ -668,6 +680,8 @@ def decide(game_state: Dict[str, Any]) -> Dict[str, Any]:
         food_gate *= float(d["race_food_gate"])
     elif undersized:
         food_gate *= float(d["undersized_food_gate"])
+    if early:
+        food_gate *= float(d.get("early_food_gate_scale", 1.0))
     if starve_urgency > 0.35 or (
         food_dist_now is not None and food_dist_now <= 2 and danger_now > 1.5
     ):
@@ -732,9 +746,9 @@ def decide(game_state: Dict[str, Any]) -> Dict[str, Any]:
         else:
             food_dist = _nearest_food(nxt, board.get("food") or [])
         food_pull = 0.0 if food_dist is None else 1.0 / (1.0 + food_dist)
-        vel_threat = _velocity_threat(nxt, board, you)
+        vel_threat = _velocity_threat(nxt, board, you, d)
         if food_target.get("race"):
-            vel_threat *= 0.85
+            vel_threat *= float(d.get("race_threat_soften", 0.85))
         vel = -vel_threat
         cell_danger = _min_danger(nxt, board, you)
         fruit_hard = cell_danger <= float(d["fruit_hard_danger"])
