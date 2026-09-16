@@ -663,11 +663,21 @@ def decide(game_state: Dict[str, Any]) -> Dict[str, Any]:
         if food_target["myDist"] is not None
         else _nearest_food(head, board.get("food") or [])
     )
+    # Panic must be rare: OR(danger<=1) fired whenever SmartyTree's body was adjacent,
+    # locking fly into escape for ~60% of Rung4 games and starving growth/courtship.
+    snake_near = _min_snake_danger(head, board, you)
+    tunnel_thresh = float(d.get("panic_tunnel_thresh", 0.08))
     panic = (
-        safety < float(d["panic_safety_thresh"]) or danger_now <= float(d["panic_danger_thresh"])
-    ) and starve_urgency < float(d["starve_blocks_panic_above"])
+        (
+            (safety < float(d["panic_safety_thresh"]) and snake_near <= float(d["panic_danger_thresh"]))
+            or safety < tunnel_thresh
+        )
+        and starve_urgency < float(d["starve_blocks_panic_above"])
+    )
     undersized = size["size_advantage"] < 0.5
     dominant = size["size_advantage"] >= 0.55 or bool(size.get("longest"))
+    len_gap = int(size.get("length_max_rival") or 0) - int(size.get("length_you") or 0)
+    behind = len_gap >= int(d.get("catchup_len_gap", 2) or 2)
     orchard = _orchard_scent(board, head)
     food_count = int(orchard["foodCount"])
     food_abundance = float(orchard["abundance"])
@@ -688,6 +698,8 @@ def decide(game_state: Dict[str, Any]) -> Dict[str, Any]:
         food_gate *= float(d["race_food_gate"])
     elif undersized:
         food_gate *= float(d["undersized_food_gate"])
+    if behind:
+        food_gate = max(food_gate, float(d.get("catchup_food_gate", 1.55)))
     if early:
         food_gate *= float(d.get("early_food_gate_scale", 1.0))
     if starve_urgency > 0.35 or (
@@ -903,6 +915,10 @@ def decide(game_state: Dict[str, Any]) -> Dict[str, Any]:
         scored.append(row)
 
     legal = [s for s in scored if not s["fatal"]]
+    # Prefer pockets that fit our body when any fitting escape exists (self-trap fix).
+    fitting = [s for s in legal if s.get("pocketOk", True)]
+    if fitting:
+        legal = fitting
     legal.sort(key=lambda s: s["score"], reverse=True)
     pick = legal[0]["move"] if legal else OPPOSITE.get(neck or "up", "up")
     pick_sec = legal[0] if legal else None
@@ -999,6 +1015,9 @@ def decide(game_state: Dict[str, Any]) -> Dict[str, Any]:
             "size_lead": size["size_lead"],
             "longest": size["longest"],
             "panic": panic,
+            "behind": behind,
+            "len_gap": len_gap,
+            "snake_near": snake_near,
             "food_gate": food_gate,
             "health": health,
             "starve_urgency": starve_urgency,
