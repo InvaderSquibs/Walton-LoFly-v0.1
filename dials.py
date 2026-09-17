@@ -72,8 +72,12 @@ _DEFAULTS: Dict[str, Any] = {
     "trajectory_flank_scale": 0.45,
     "away_from_rival_weight": 2.8,
     "contested_cell_penalty": 4.5,
+    "contested_food_penalty": 3.0,
     "move_budget_ms": 420,
     "brain_min_ms_left": 120,
+    "latency_ema_alpha": 0.2,
+    "latency_fallback_ms": 430,
+    "latency_recover_ms": 320,
     # Large behavioral modes (compound strategies)
     "wall_fear_adjacent_only": False,
     "hunt_smaller_weight": 0.0,

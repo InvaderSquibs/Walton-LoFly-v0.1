@@ -47,6 +47,48 @@ HEAD = os.environ.get("FS_AVATAR_HEAD", "smart-caterpillar")
 TAIL = os.environ.get("FS_AVATAR_TAIL", "fat-rattle")
 SNAKE_NAME = os.environ.get("FS_AVATAR_NAME", "Walton-LoFly")
 
+# Rolling latency telemetry → auto-fallback off brain if we're too slow for public 500ms.
+_latency_lock = threading.Lock()
+_latency_ema_ms: float = 0.0
+_latency_samples: int = 0
+_brain_fallback: bool = False
+_latency_last_ms: float = 0.0
+
+
+def _latency_record(ms: float, dials: Dict[str, Any]) -> None:
+    global _latency_ema_ms, _latency_samples, _brain_fallback, _latency_last_ms
+    alpha = float(dials.get("latency_ema_alpha", 0.2) or 0.2)
+    trip = float(dials.get("latency_fallback_ms", 430) or 430)
+    recover = float(dials.get("latency_recover_ms", 320) or 320)
+    with _latency_lock:
+        _latency_last_ms = ms
+        if _latency_samples == 0:
+            _latency_ema_ms = ms
+        else:
+            _latency_ema_ms = (1.0 - alpha) * _latency_ema_ms + alpha * ms
+        _latency_samples += 1
+        if _latency_ema_ms >= trip:
+            _brain_fallback = True
+        elif _latency_ema_ms <= recover and _latency_samples > 8:
+            _brain_fallback = False
+
+
+def _latency_snapshot() -> Dict[str, Any]:
+    with _latency_lock:
+        return {
+            "ema_ms": round(_latency_ema_ms, 1),
+            "last_ms": round(_latency_last_ms, 1),
+            "samples": _latency_samples,
+            "brain_fallback": _brain_fallback,
+        }
+
+
+def _brain_allowed(dials: Dict[str, Any]) -> bool:
+    if bool(dials.get("brain_force_off", False)):
+        return False
+    with _latency_lock:
+        return not _brain_fallback
+
 MOVES = ("up", "down", "left", "right")
 DELTA = {
     "up": (0, 1),
@@ -1208,7 +1250,14 @@ def decide(game_state: Dict[str, Any]) -> Dict[str, Any]:
         contested_term = 0.0
         nxt_k = _key(nxt)
         if nxt_k in traj and traj[nxt_k] >= traj_hi:
-            contested_term = -contested_pen if not dominant else -0.6 * contested_pen
+            # Shorter → never contest projected heads; longer → soft penalty only
+            if undersized or not dominant:
+                contested_term = -contested_pen * (1.35 if undersized else 1.0)
+            else:
+                contested_term = -0.45 * contested_pen
+        # Owned food only: contested berries get muted unless starving
+        if on_food and food_target.get("contested") and starve_urgency < 0.55 and not dominant:
+            contested_term -= float(d.get("contested_food_penalty", 3.0) or 3.0)
         plan_term = plan_w * float(plan_vals.get(move, 0.0))
         hunt_term = _hunt_smaller_score(nxt, board, you, d)
         cutoff_term = _cutoff_score(board, you, nxt, on_food, d)
@@ -1333,11 +1382,13 @@ def decide(game_state: Dict[str, Any]) -> Dict[str, Any]:
         scored.append(row)
 
     # Full MaleCNS blend — dials are gains on the fixed connectome mapping.
-    # Skip when latency budget is tight (public games ≈500ms).
+    # Skip when latency budget is tight or auto-fallback tripped (public ≈500ms).
+    brain_used = False
     if (
         full_brain is not None
         and full_brain.brain_enabled()
         and float(d.get("brain_blend", 0) or 0) > 0
+        and _brain_allowed(d)
         and _ms_left() > float(d.get("brain_min_ms_left", 120) or 120)
     ):
         try:
@@ -1366,6 +1417,7 @@ def decide(game_state: Dict[str, Any]) -> Dict[str, Any]:
                 if s["move"] in blended:
                     s["brainRate"] = float(brain_rates.get(s["move"], 0.0))
                     s["score"] = float(blended[s["move"]])
+            brain_used = True
         except Exception as exc:  # noqa: BLE001
             print(f"  brain blend skipped: {exc}")
 
@@ -1488,6 +1540,10 @@ def decide(game_state: Dict[str, Any]) -> Dict[str, Any]:
         "KC_escape": 0.85 if panic else max(0.0, 1.0 - safety) * 0.35 + 0.4 * here_sectors["threat"],
     }
 
+    move_ms = (time.perf_counter() - t0) * 1000.0
+    _latency_record(move_ms, d)
+    _lat = _latency_snapshot()
+
     return {
         "move": pick,
         "shout": shout,
@@ -1544,6 +1600,9 @@ def decide(game_state: Dict[str, Any]) -> Dict[str, Any]:
             "wiring": d.get("wiring") or "retina_sectors_v1_orchard",
             "dials_id": d.get("id"),
             "neuron_targets": neuron_targets,
+            "brain_used": brain_used,
+            "latency": _lat,
+            "move_ms": round(move_ms, 1),
         },
     }
 
@@ -1741,6 +1800,7 @@ class Handler(BaseHTTPRequestHandler):
                         full_brain is not None and full_brain.brain_enabled()
                     ),
                     "brain_blend": float(d.get("brain_blend", 0) or 0),
+                    "latency": _latency_snapshot(),
                 },
             )
             return
@@ -1930,7 +1990,24 @@ def main() -> None:
     if full_brain is not None and full_brain.brain_enabled():
         try:
             meta = full_brain.load()["meta"]
-            brain_note = f"FULL MaleCNS N={meta.get('n_neurons')} nnz={meta.get('nnz')}"
+            # Warm-start: one dummy simulate so the first tournament /move isn't cold
+            t_warm = time.perf_counter()
+            drives = full_brain.board_drives(
+                danger=2.0,
+                safety=0.5,
+                hunger=0.3,
+                food_near=0.4,
+                courtship=0.2,
+                size_advantage=0.5,
+                panic=False,
+                visual_open=0.5,
+            )
+            full_brain.simulate(drives, {**d, "brain_steps": min(4, int(d.get("brain_steps", 4) or 4))})
+            warm_ms = (time.perf_counter() - t_warm) * 1000.0
+            brain_note = (
+                f"FULL MaleCNS N={meta.get('n_neurons')} nnz={meta.get('nnz')} "
+                f"warm={warm_ms:.0f}ms"
+            )
         except Exception as exc:  # noqa: BLE001
             brain_note = f"error:{exc}"
     print(f"FS-Avatar Battlesnake on http://0.0.0.0:{PORT}")
