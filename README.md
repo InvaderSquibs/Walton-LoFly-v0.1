@@ -1,32 +1,38 @@
-# Walton-LoFly-v0.1 (Replit)
+# Walton-LoFly (Replit)
 
-Battlesnake webhook for Funathon. **Deploy here first**, then register the public URL on play.battlesnake.com.
+Battlesnake webhook for Funathon. **Full MaleCNS brain** (211k neurons, ~26M synapses) + dial gains. Deploy here, then register the public URL on play.battlesnake.com.
 
-## Deploy order (recommended)
+## What’s in this package
 
-1. Open this folder as a Replit App (upload / import / paste these files).
-2. Set Secrets (optional): `FS_AVATAR_NAME=Walton-LoFly-v0.1`, `FS_AVATAR_COLOR=#f0b429`, `FS_AVATAR_AUTHOR=Walton`.
-3. Click **Run**, then **Publish** so the URL stays awake for tournaments.
-4. Copy the public URL (e.g. `https://….replit.app`).
-5. On [play.battlesnake.com/account/battlesnakes](https://play.battlesnake.com/account/battlesnakes) → create snake:
-   - **Name:** `Walton-LoFly-v0.1` (must include Walton)
+- `main.py` — Battlesnake webhook (`/move` blends policy dials with full-brain readout)
+- `full_brain.py` + `full_brain_cache/` — fixed connectome (no subgraph)
+- `ladder/dials/leader.json` — promoted dials (`wiring=full_malecns_v1`, `brain_blend≈0.55`)
+- `cortex.py` / `dials.py` / `game_log.py`
+
+## Deploy order
+
+1. Open / pull this Replit App.
+2. Secrets (optional): `FS_AVATAR_NAME=Walton-LoFly`, `FS_AVATAR_COLOR=#111111`, `FS_AVATAR_AUTHOR=Walton`.
+3. Env should include `FS_AVATAR_BRAIN=1` (set in `.replit`). First boot loads ~100MB cache (~1–2s).
+4. **Run**, then **Publish** so the URL stays awake.
+5. Copy the public URL → [Battlesnake snakes](https://play.battlesnake.com/account/battlesnakes):
+   - **Name:** `Walton-LoFly` (must include Walton)
    - **URL:** that Replit URL
 6. Hit the URL in a browser before each tournament so Replit is awake.
+
+## Sync from fly-brain (Cursor / local)
+
+```bash
+cd fly_console/activities/fs-avatar
+bash scripts/deploy_replit.sh
+# then on Replit: Pull / Republish
+```
 
 ## Local check
 
 ```bash
-python main.py
-# → GET http://127.0.0.1:$PORT/
+pip install -r requirements.txt
+FS_AVATAR_BRAIN=1 python main.py
+curl -s http://127.0.0.1:${PORT:-8001}/dev/status
+# expect "brain": true
 ```
-
-After policy / dial changes in fly-brain, sync into this folder then **republish** on Replit:
-
-```bash
-cp ../server.py main.py
-cp ../game_log.py game_log.py
-cp ../dials.py dials.py
-cp ../ladder/dials/leader.json ladder/dials/leader.json
-```
-
-Leader knobs live in `ladder/dials/leader.json` (loaded automatically).

@@ -27,12 +27,18 @@ import subprocess
 import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 from urllib.parse import parse_qs, urlparse
 
 import dials as dials_mod
 import game_log
 import cortex
+
+try:
+    import full_brain
+except Exception:  # noqa: BLE001
+    full_brain = None  # type: ignore
 
 PORT = int(os.environ.get("PORT") or os.environ.get("FS_AVATAR_PORT", "8001"))
 AUTHOR = os.environ.get("FS_AVATAR_AUTHOR", "Walton")
@@ -1298,6 +1304,36 @@ def decide(game_state: Dict[str, Any]) -> Dict[str, Any]:
         )
         scored.append(row)
 
+    # Full MaleCNS blend — dials are gains on the fixed connectome mapping
+    if (
+        full_brain is not None
+        and full_brain.brain_enabled()
+        and float(d.get("brain_blend", 0) or 0) > 0
+    ):
+        try:
+            food_near = 0.0
+            if food_dist_now is not None:
+                food_near = max(0.0, 1.0 - min(1.0, float(food_dist_now) / 6.0))
+            drives = full_brain.board_drives(
+                danger=float(danger_now),
+                safety=float(safety),
+                hunger=float(hunger),
+                food_near=food_near,
+                courtship=float(courtship),
+                size_advantage=float(size.get("size_advantage") or 0.5),
+                panic=bool(panic),
+                visual_open=float(safety),
+            )
+            brain_rates, _ch = full_brain.simulate(drives, d)
+            heur = {s["move"]: float(s["score"]) for s in scored if not s["fatal"]}
+            blended = full_brain.blend_move_scores(heur, brain_rates, d)
+            for s in scored:
+                if s["move"] in blended:
+                    s["brainRate"] = float(brain_rates.get(s["move"], 0.0))
+                    s["score"] = float(blended[s["move"]])
+        except Exception as exc:  # noqa: BLE001
+            print(f"  brain blend skipped: {exc}")
+
     legal = [s for s in scored if not s["fatal"]]
     # Prefer pockets that fit our body when any fitting escape exists (self-trap fix).
     fitting = [s for s in legal if s.get("pocketOk", True)]
@@ -1666,6 +1702,10 @@ class Handler(BaseHTTPRequestHandler):
                     "dials_id": d.get("id"),
                     "dials_path": str(dials_mod.dials_path() or "(defaults)"),
                     "wiring": d.get("wiring"),
+                    "brain": bool(
+                        full_brain is not None and full_brain.brain_enabled()
+                    ),
+                    "brain_blend": float(d.get("brain_blend", 0) or 0),
                 },
             )
             return
@@ -1794,6 +1834,44 @@ class Handler(BaseHTTPRequestHandler):
             )
             return
 
+        if path == "/dev/persona":
+            # Hot-swap breed persona onto this warm fly (no process restart).
+            global SNAKE_NAME, COLOR, HEAD, TAIL
+            dials_path = data.get("dials_path") or data.get("path")
+            if not dials_path:
+                self._json(400, {"error": "dials_path required"})
+                return
+            p = Path(str(dials_path)).expanduser().resolve()
+            if not p.is_file():
+                self._json(404, {"error": f"dials not found: {p}"})
+                return
+            d = dials_mod.set_dials_path(p)
+            if data.get("name"):
+                SNAKE_NAME = str(data["name"])
+            elif d.get("id"):
+                SNAKE_NAME = str(d["id"])
+            if data.get("color"):
+                COLOR = str(data["color"])
+            if data.get("head"):
+                HEAD = str(data["head"])
+            if data.get("tail"):
+                TAIL = str(data["tail"])
+            self._json(
+                200,
+                {
+                    "ok": True,
+                    "dials_id": d.get("id"),
+                    "dials_path": str(p),
+                    "name": SNAKE_NAME,
+                    "color": COLOR,
+                    "wiring": d.get("wiring"),
+                    "brain": bool(
+                        full_brain is not None and full_brain.brain_enabled()
+                    ),
+                },
+            )
+            return
+
         if path == "/dev/play":
             result = _start_play(data or {})
             self._json(200 if result.get("ok") else 400, result)
@@ -1813,11 +1891,23 @@ def main() -> None:
     server = ThreadingHTTPServer(("0.0.0.0", PORT), Handler)
     cli = _find_battlesnake()
     d = dials_mod.load_dials()
+    brain_note = "off"
+    if full_brain is not None and full_brain.brain_enabled():
+        try:
+            meta = full_brain.load()["meta"]
+            brain_note = f"FULL MaleCNS N={meta.get('n_neurons')} nnz={meta.get('nnz')}"
+        except Exception as exc:  # noqa: BLE001
+            brain_note = f"error:{exc}"
     print(f"FS-Avatar Battlesnake on http://0.0.0.0:{PORT}")
     print(f"  identity: {SNAKE_NAME} (author={AUTHOR}, color={COLOR})")
     print(f"  dials: {d.get('id')} ← {dials_mod.dials_path() or '(defaults)'}")
+    print(f"  brain: {brain_note}")
     print(f"  battlesnake CLI: {cli or 'NOT FOUND — install to use /dev/play'}")
-    print("  console helpers: GET /dev/status  GET /dev/last  GET /dev/frames  GET /dev/games  GET /dev/game/latest?summary=1  GET /dev/batch  POST /dev/play")
+    print(
+        "  console helpers: GET /dev/status  GET /dev/last  GET /dev/frames  "
+        "GET /dev/games  GET /dev/game/latest?summary=1  GET /dev/batch  "
+        "POST /dev/play  POST /dev/persona"
+    )
     print(f"  game logs: {game_log.LOG_DIR}")
     server.serve_forever()
 

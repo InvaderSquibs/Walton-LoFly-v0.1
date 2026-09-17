@@ -1,2 +1,2 @@
-# Stdlib-only Battlesnake webhook — no pip deps required.
-# Kept so Replit's package resolver is happy.
+numpy>=1.26
+scipy>=1.11

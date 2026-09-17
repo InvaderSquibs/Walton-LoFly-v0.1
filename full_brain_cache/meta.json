@@ -1,0 +1,28 @@
+{
+  "n_neurons": 211577,
+  "n_synapses_raw_keep": 26028386,
+  "nnz": 26028386,
+  "channels": {
+    "ALPN": 686,
+    "Kenyon_Cell": 4064,
+    "MBON": 97,
+    "DAN": 340,
+    "descending": 1314,
+    "ORN": 2635,
+    "courtship_pC1": 156,
+    "courtship_vPR6": 8,
+    "courtship_TN1": 35,
+    "visual_L1": 1776,
+    "visual_L2": 1779,
+    "visual_L3": 1772
+  },
+  "move_pools": {
+    "up": 329,
+    "down": 329,
+    "left": 328,
+    "right": 328
+  },
+  "built_s": 26.7,
+  "source_edges": "connectome-weights-male-cns-v1.0-minconf-0.5.feather",
+  "note": "Full annotated MaleCNS \u2014 no subgraph. Edges require both endpoints annotated."
+}

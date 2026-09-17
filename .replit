@@ -40,3 +40,7 @@ waitForPort = 5000
 
 [workflows.workflow.metadata]
 outputType = "webview"
+
+[env]
+FS_AVATAR_BRAIN = "1"
+FS_AVATAR_DIALS = "ladder/dials/leader.json"

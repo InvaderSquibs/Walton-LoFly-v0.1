@@ -11,7 +11,7 @@ DEFAULT_DIALS_PATH = ROOT / "ladder" / "dials" / "leader.json"
 
 _DEFAULTS: Dict[str, Any] = {
     "id": "defaults",
-    "wiring": "retina_sectors_v1_orchard",
+    "wiring": "full_malecns_v1",
     "panic_food_gate": 0.8,
     "panic_safety_thresh": 0.18,
     "panic_danger_thresh": 1.0,
@@ -75,21 +75,54 @@ _DEFAULTS: Dict[str, Any] = {
     "body_block_weight": 0.0,
     "open_board_bias": 0.0,
     "bully_threat_scale": 1.0,
+    # Full MaleCNS rate-net gains (fixed mapping; dials modulate the fly)
+    "brain_blend": 0.55,
+    "brain_score_scale": 8.0,
+    "brain_tau": 8.0,
+    "brain_dt": 1.0,
+    "brain_steps": 8,
+    "brain_w_scale": 0.35,
+    "brain_r_max": 250.0,
+    "brain_gain_alpn": 1.0,
+    "brain_gain_orn": 1.0,
+    "brain_gain_mbon": 1.0,
+    "brain_gain_dan": 1.0,
+    "brain_gain_kc": 1.0,
+    "brain_gain_court": 1.0,
+    "brain_gain_visual": 1.0,
+    "brain_readout_up": 1.0,
+    "brain_readout_down": 1.0,
+    "brain_readout_left": 1.0,
+    "brain_readout_right": 1.0,
 }
 
 _cache: Dict[str, Any] = {}
 _cache_path: str = ""
 _cache_mtime: float = -1.0
+# Runtime persona override (hot-swap without process restart)
+_override_path: Optional[Path] = None
 
 
 def dials_path() -> Optional[Path]:
     """Resolve dials file. FS_AVATAR_DIALS='-' or '' → built-in defaults (no file)."""
+    if _override_path is not None:
+        return _override_path
     if "FS_AVATAR_DIALS" in os.environ:
         raw = os.environ.get("FS_AVATAR_DIALS") or ""
         if raw in ("", "-", "defaults", "none"):
             return None
         return Path(raw).expanduser().resolve()
     return DEFAULT_DIALS_PATH
+
+
+def set_dials_path(path: Optional[Any] = None) -> Dict[str, Any]:
+    """Point this process at a new dials persona and reload immediately."""
+    global _override_path
+    if path is None or str(path) in ("", "-", "defaults", "none"):
+        _override_path = None
+    else:
+        _override_path = Path(str(path)).expanduser().resolve()
+    return load_dials(force=True)
 
 
 def load_dials(force: bool = False) -> Dict[str, Any]:
