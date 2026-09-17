@@ -171,8 +171,45 @@ def predicted_rival_cells(
     dials: Dict[str, Any],
 ) -> Set[Tuple[int, int]]:
     """Cells rivals are likely to occupy next turn (head step)."""
-    out: Set[Tuple[int, int]] = set()
+    return set(rival_trajectory_threats(mem, board, you, dials).keys())
+
+
+def _rival_heading(
+    mem: GameMemory,
+    sid: str,
+    snake: Dict[str, Any],
+) -> Optional[str]:
+    headings = list(mem.rival_headings.get(sid) or [])
+    if headings:
+        return headings[-1]
+    habit = mem.rival_habits.get(sid) or Counter()
+    if habit:
+        return habit.most_common(1)[0][0]
+    body = snake.get("body") or []
+    if len(body) >= 2:
+        return _heading(body[1], body[0])
+    return None
+
+
+def rival_trajectory_threats(
+    mem: GameMemory,
+    board: Dict[str, Any],
+    you: Dict[str, Any],
+    dials: Dict[str, Any],
+) -> Dict[Tuple[int, int], float]:
+    """
+    Map cell → threat from where rivals are *headed*.
+
+    Projects each rival along their last heading for `trajectory_horizon` steps
+    and marks the corridor (plus adjacent flanks) so we steer off their path.
+    """
+    out: Dict[Tuple[int, int], float] = {}
     you_id = you.get("id")
+    you_len = int(you.get("length") or len(you.get("body") or []) or 0)
+    horizon = max(1, int(dials.get("trajectory_horizon", 3) or 3))
+    base_w = float(dials.get("trajectory_weight", 3.5) or 3.5)
+    flank_w = float(dials.get("trajectory_flank_scale", 0.45) or 0.45)
+
     for snake in board.get("snakes") or []:
         sid = str(snake.get("id") or "")
         if not sid or sid == you_id:
@@ -180,25 +217,45 @@ def predicted_rival_cells(
         head = snake.get("head") or (snake.get("body") or [None])[0]
         if not head:
             continue
-        headings = list(mem.rival_headings.get(sid) or [])
-        habit = mem.rival_habits.get(sid) or Counter()
-        # Prefer last heading; else mode habit; else all 4 (cautious)
-        cands: List[str] = []
-        if headings:
-            cands.append(headings[-1])
-        if habit:
-            cands.append(habit.most_common(1)[0][0])
-        if not cands:
-            cands = list(MOVES)
-        # unique preserve order
-        seen = set()
-        for m in cands:
-            if m in seen:
-                continue
-            seen.add(m)
-            nxt = _add(head, DELTA[m])
-            if _in_bounds(board, nxt):
-                out.add(_key(nxt))
+        hdg = _rival_heading(mem, sid, snake)
+        if not hdg:
+            # Unknown direction: soft threat on all adjacent cells
+            for m, delta in DELTA.items():
+                nxt = _add(head, delta)
+                if _in_bounds(board, nxt):
+                    k = _key(nxt)
+                    out[k] = max(out.get(k, 0.0), 0.55 * base_w)
+            continue
+
+        rival_len = int(snake.get("length") or len(snake.get("body") or []) or 0)
+        # Longer / equal rivals are more dangerous in our path
+        size_f = 1.15 if rival_len >= you_len else 0.75
+        dx, dy = DELTA[hdg]
+        # Perpendicular flanks for the corridor
+        flanks = ((-dy, dx), (dy, -dx))
+
+        cur = {"x": int(head["x"]), "y": int(head["y"])}
+        for step in range(1, horizon + 1):
+            cur = {"x": cur["x"] + dx, "y": cur["y"] + dy}
+            if not _in_bounds(board, cur):
+                break
+            falloff = (horizon + 1 - step) / float(horizon)
+            w = base_w * falloff * size_f
+            k = _key(cur)
+            out[k] = max(out.get(k, 0.0), w)
+            # Mark flanks slightly so we don't graze their lane
+            for fx, fy in flanks:
+                side = {"x": cur["x"] + fx, "y": cur["y"] + fy}
+                if _in_bounds(board, side):
+                    sk = _key(side)
+                    out[sk] = max(out.get(sk, 0.0), w * flank_w)
+
+        # Also mark immediate next cell strongly (H2H / head collision)
+        nxt1 = _add(head, DELTA[hdg])
+        if _in_bounds(board, nxt1):
+            k1 = _key(nxt1)
+            out[k1] = max(out.get(k1, 0.0), base_w * 1.25 * size_f)
+
     return out
 
 
@@ -214,11 +271,64 @@ def habit_threat(
     you: Dict[str, Any],
     dials: Dict[str, Any],
 ) -> float:
-    """Extra threat if cell matches a predicted rival head."""
-    pred = predicted_rival_cells(mem, board, you, dials)
-    if _key(cell) not in pred:
+    """Threat if cell lies on a predicted rival trajectory / next head."""
+    threats = rival_trajectory_threats(mem, board, you, dials)
+    base = float(threats.get(_key(cell), 0.0))
+    if base <= 0:
         return 0.0
-    return float(dials.get("memory_predict_weight", 2.2))
+    # Legacy dial still scales the whole signal
+    scale = float(dials.get("memory_predict_weight", 2.2)) / 2.2
+    return base * scale
+
+
+def away_from_rivals_bonus(
+    mem: GameMemory,
+    head: Dict[str, int],
+    nxt: Dict[str, int],
+    board: Dict[str, Any],
+    you: Dict[str, Any],
+    dials: Dict[str, Any],
+) -> float:
+    """
+    Reward moves that increase distance from where rivals will be next.
+    Positive = escaping their projected heads.
+    """
+    w = float(dials.get("away_from_rival_weight", 2.8) or 2.8)
+    if w <= 0:
+        return 0.0
+    you_id = you.get("id")
+    bonus = 0.0
+    for snake in board.get("snakes") or []:
+        sid = str(snake.get("id") or "")
+        if not sid or sid == you_id:
+            continue
+        rhead = snake.get("head") or (snake.get("body") or [None])[0]
+        if not rhead:
+            continue
+        hdg = _rival_heading(mem, sid, snake)
+        proj = _add(rhead, DELTA[hdg]) if hdg else dict(rhead)
+        if not _in_bounds(board, proj):
+            proj = dict(rhead)
+        d0 = abs(int(head["x"]) - int(proj["x"])) + abs(int(head["y"]) - int(proj["y"]))
+        d1 = abs(int(nxt["x"]) - int(proj["x"])) + abs(int(nxt["y"]) - int(proj["y"]))
+        delta = d1 - d0
+        rival_len = int(snake.get("length") or len(snake.get("body") or []) or 0)
+        you_len = int(you.get("length") or len(you.get("body") or []) or 0)
+        size_f = 1.2 if rival_len >= you_len else 0.7
+        # Stronger when already close
+        prox = 1.0 / (1.0 + min(d0, 4))
+        bonus += w * size_f * prox * float(delta)
+
+        # Head-on into their lane: heavy penalty (delta already negative, amplify)
+        if hdg and OPPOSITE.get(hdg):
+            # Moving into cell that is their next cell
+            if _key(nxt) == _key(proj):
+                bonus -= w * 2.5 * size_f
+            # Moving opposite their heading while adjacent on their axis
+            our_step = _heading(head, nxt)
+            if our_step == OPPOSITE[hdg] and d0 <= 2:
+                bonus -= w * 1.4 * size_f
+    return bonus
 
 
 def _body_after(you: Dict[str, Any], nxt: Dict[str, int], grow: bool) -> List[Dict[str, int]]:

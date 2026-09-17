@@ -1181,9 +1181,10 @@ def decide(game_state: Dict[str, Any]) -> Dict[str, Any]:
                     wall_term -= float(d.get("edge_trap_penalty", 6.0))
                 elif wall_dist <= 1:
                     wall_term -= float(d.get("near_edge_penalty", 2.0))
-        # Memory: avoid scarred cells + predicted rival heads
+        # Memory: avoid scarred cells + predicted rival trajectories; flee their heading
         scar_term = -cortex.scar_penalty(mem, nxt, d)
         predict_term = -cortex.habit_threat(mem, nxt, board, you, d)
+        away_term = cortex.away_from_rivals_bonus(mem, head, nxt, board, you, d)
         plan_term = plan_w * float(plan_vals.get(move, 0.0))
         hunt_term = _hunt_smaller_score(nxt, board, you, d)
         cutoff_term = _cutoff_score(board, you, nxt, on_food, d)
@@ -1277,6 +1278,7 @@ def decide(game_state: Dict[str, Any]) -> Dict[str, Any]:
             planScore=float(plan_vals.get(move, 0.0)),
             scarPenalty=-scar_term,
             predictThreat=-predict_term,
+            awayFromRivals=away_term,
             score=(
                 (5.0 - 1.5 * aggression) * danger_score
                 + 1.6 * space_score * space_boost * space_len_w
@@ -1296,6 +1298,7 @@ def decide(game_state: Dict[str, Any]) -> Dict[str, Any]:
                 + plan_term
                 + scar_term
                 + predict_term
+                + away_term
                 + hunt_term
                 + cutoff_term
                 + block_term
