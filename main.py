@@ -36,7 +36,7 @@ import cortex
 
 PORT = int(os.environ.get("PORT") or os.environ.get("FS_AVATAR_PORT", "8001"))
 AUTHOR = os.environ.get("FS_AVATAR_AUTHOR", "Walton")
-COLOR = os.environ.get("FS_AVATAR_COLOR", "#141414")
+COLOR = os.environ.get("FS_AVATAR_COLOR", "#111111")
 HEAD = os.environ.get("FS_AVATAR_HEAD", "smart-caterpillar")
 TAIL = os.environ.get("FS_AVATAR_TAIL", "fat-rattle")
 SNAKE_NAME = os.environ.get("FS_AVATAR_NAME", "Walton-LoFly")
