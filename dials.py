@@ -67,6 +67,14 @@ _DEFAULTS: Dict[str, Any] = {
     "memory_scar_weight": 1.4,
     "memory_scar_decay": 0.85,
     "memory_predict_weight": 2.2,
+    # Large behavioral modes (compound strategies)
+    "wall_fear_adjacent_only": False,
+    "hunt_smaller_weight": 0.0,
+    "hunt_when_dominant": False,
+    "cutoff_weight": 0.0,
+    "body_block_weight": 0.0,
+    "open_board_bias": 0.0,
+    "bully_threat_scale": 1.0,
 }
 
 _cache: Dict[str, Any] = {}

@@ -301,10 +301,150 @@ def _min_danger(head: Dict[str, int], board: Dict[str, Any], you: Dict[str, Any]
             board["width"] - 1 - head["x"],
             board["height"] - 1 - head["y"],
         )
-        best = min(best, wall + 0.5)
+        # Adjacent-only: ignore walls until you're already next to one.
+        if d.get("wall_fear_adjacent_only"):
+            if wall <= 1:
+                best = min(best, wall + 0.5)
+        else:
+            best = min(best, wall + 0.5)
     if not math.isfinite(best):
         best = float(max(board["width"], board["height"]))
     return best
+
+
+def _hunt_smaller_score(
+    cell: Dict[str, int],
+    board: Dict[str, Any],
+    you: Dict[str, Any],
+    dials: Dict[str, Any],
+) -> float:
+    """Reward approaching / head-checking shorter rivals (eat when bigger)."""
+    w = float(dials.get("hunt_smaller_weight", 0.0) or 0.0)
+    if w <= 0:
+        return 0.0
+    my_len = int(you.get("length") or len(you.get("body") or []) or 1)
+    best = 0.0
+    for snake in board.get("snakes") or []:
+        if snake.get("id") == you.get("id"):
+            continue
+        their = int(snake.get("length") or len(snake.get("body") or []) or 0)
+        if their <= 0 or their >= my_len:
+            continue
+        head = snake.get("head") or (snake.get("body") or [None])[0]
+        if not head:
+            continue
+        dist = _manhattan(cell, head)
+        # Closer is better; adjacent to smaller head is a kill setup.
+        gain = w * (1.0 / (1.0 + dist)) * (1.0 + 0.35 * (my_len - their))
+        if dist == 1:
+            gain += w * 1.25
+        if dist == 0:
+            gain += w * 0.4  # overlapping projected path
+        if gain > best:
+            best = gain
+    return best
+
+
+def _cutoff_score(
+    board: Dict[str, Any],
+    you: Dict[str, Any],
+    nxt: Dict[str, int],
+    grow: bool,
+    dials: Dict[str, Any],
+) -> float:
+    """
+    Reward moves that shrink rival reachable space (cut them off / claim territory).
+    Compares each rival's flood before vs after we occupy nxt.
+    """
+    w = float(dials.get("cutoff_weight", 0.0) or 0.0)
+    if w <= 0:
+        return 0.0
+    you_id = you.get("id")
+    # Baseline rival floods on current board
+    before: Dict[str, int] = {}
+    for snake in board.get("snakes") or []:
+        sid = snake.get("id")
+        if sid == you_id:
+            continue
+        rh = snake.get("head") or (snake.get("body") or [None])[0]
+        if not rh:
+            continue
+        blk = _blocked(board, snake)
+        before[str(sid)] = _flood(board, rh, blk)
+
+    # Board after our move
+    new_body = _body_after_move(you, nxt, grow)
+    you2 = {
+        "id": you_id,
+        "body": new_body,
+        "head": dict(nxt),
+        "length": len(new_body),
+    }
+    snakes2 = []
+    for s in board.get("snakes") or []:
+        snakes2.append(you2 if s.get("id") == you_id else s)
+    board2 = {
+        "width": board["width"],
+        "height": board["height"],
+        "food": board.get("food") or [],
+        "hazards": board.get("hazards") or [],
+        "snakes": snakes2,
+    }
+    total_shrink = 0.0
+    for snake in snakes2:
+        sid = snake.get("id")
+        if sid == you_id:
+            continue
+        rh = snake.get("head") or (snake.get("body") or [None])[0]
+        if not rh:
+            continue
+        # If we landed on their head and we're longer — treat as huge cutoff/kill
+        if _key(rh) == _key(nxt):
+            their = int(snake.get("length") or len(snake.get("body") or []) or 0)
+            if their < int(you2["length"]):
+                total_shrink += 40.0
+            continue
+        blk2 = _blocked(board2, snake)
+        after = _flood(board2, rh, blk2)
+        prev = before.get(str(sid), after)
+        shrink = max(0, prev - after)
+        total_shrink += shrink
+    # Normalize a bit by board area
+    area = float(board["width"] * board["height"]) or 1.0
+    return w * (total_shrink / area) * 12.0
+
+
+def _body_block_score(
+    cell: Dict[str, int],
+    board: Dict[str, Any],
+    you: Dict[str, Any],
+    dials: Dict[str, Any],
+) -> float:
+    """Sit on a rival's projected next cell to body-block / deny lines."""
+    w = float(dials.get("body_block_weight", 0.0) or 0.0)
+    if w <= 0:
+        return 0.0
+    my_len = int(you.get("length") or len(you.get("body") or []) or 1)
+    score = 0.0
+    for snake in board.get("snakes") or []:
+        if snake.get("id") == you.get("id"):
+            continue
+        head = snake.get("head") or (snake.get("body") or [None])[0]
+        if not head:
+            continue
+        vel = _last_move(snake)
+        if not vel:
+            continue
+        projected = _add(head, DELTA[vel])
+        if _key(projected) != _key(cell):
+            continue
+        their = int(snake.get("length") or len(snake.get("body") or []) or 0)
+        # Prefer blocking when we're not smaller (don't suicide into longer heads)
+        if their >= my_len:
+            score += w * 0.25
+        else:
+            score += w
+    return score
 
 
 def _velocity_threat(
@@ -339,7 +479,13 @@ def _velocity_threat(
                 threat += 1.2 * hunger_scale
         if _manhattan(head, cell) == 1:
             their = snake.get("length") or len(snake.get("body") or [])
-            threat += eq_threat if their >= my_len else short_threat
+            if their >= my_len:
+                threat += eq_threat
+            elif float(d.get("hunt_smaller_weight", 0.0) or 0.0) > 0:
+                # Hunting mode: head-adjacent to smaller is opportunity, not fear.
+                threat -= short_threat * 0.85
+            else:
+                threat += short_threat
     return threat
 
 
@@ -1022,20 +1168,37 @@ def decide(game_state: Dict[str, Any]) -> Dict[str, Any]:
         wall_term = 0.0
         if escape_focus:
             wall_term = float(d.get("escape_wall_weight", 2.2)) * float(wall_dist)
-            if wall_dist <= 0:
-                wall_term -= float(d.get("edge_trap_penalty", 6.0))
-            elif wall_dist <= 1:
-                wall_term -= float(d.get("near_edge_penalty", 2.0))
+            # Adjacent-only wall fear: don't pay edge penalties until hugging the wall.
+            edge_active = (not d.get("wall_fear_adjacent_only")) or wall_dist <= 1
+            if edge_active:
+                if wall_dist <= 0:
+                    wall_term -= float(d.get("edge_trap_penalty", 6.0))
+                elif wall_dist <= 1:
+                    wall_term -= float(d.get("near_edge_penalty", 2.0))
         # Memory: avoid scarred cells + predicted rival heads
         scar_term = -cortex.scar_penalty(mem, nxt, d)
         predict_term = -cortex.habit_threat(mem, nxt, board, you, d)
         plan_term = plan_w * float(plan_vals.get(move, 0.0))
+        hunt_term = _hunt_smaller_score(nxt, board, you, d)
+        cutoff_term = _cutoff_score(board, you, nxt, on_food, d)
+        block_term = _body_block_score(nxt, board, you, d)
+        open_bias = float(d.get("open_board_bias", 0.0) or 0.0)
+        if open_bias and not panic:
+            plan_term += open_bias * float(space_score) * space_len_w
         cone_score = float(cone_next["ratio"])
         danger_score = cell_danger / max_dim
         vel *= 1.0 - 0.45 * aggression
+        # Optional: when dominant, lean into aggression / hunting instead of soft lead-only bonus
+        hunt_when_big = bool(d.get("hunt_when_dominant", False)) and dominant and not panic
         lead_bonus = 0.6 * size["size_lead"] * food_pull if (dominant and not panic) else 0.0
+        if hunt_when_big:
+            lead_bonus += 0.35 * size["size_lead"]
+            hunt_term *= 1.35
         excl_term = 2.5 if food_target.get("race") else 1.5 * food_target["exclusivity"]
         threat_w = (0.75 if (dominant and food_target.get("race")) else 1.0) * 3.2
+        # Bully mode: care less about shorter-head threat in retina
+        if float(d.get("bully_threat_scale", 1.0) or 1.0) != 1.0 and dominant:
+            threat_w *= float(d.get("bully_threat_scale", 1.0))
         fruit_term = fruit_scale * smell_boost * 2.2 * sec["fruit"] * food_gate
         retina_prefer = (
             2.0 * sec["open"]
@@ -1127,6 +1290,9 @@ def decide(game_state: Dict[str, Any]) -> Dict[str, Any]:
                 + plan_term
                 + scar_term
                 + predict_term
+                + hunt_term
+                + cutoff_term
+                + block_term
                 - self_hug
             ),
         )
