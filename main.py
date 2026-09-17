@@ -910,6 +910,7 @@ def _sample_sectors(retina: Dict[str, Any]) -> Dict[str, Any]:
 
 
 def decide(game_state: Dict[str, Any]) -> Dict[str, Any]:
+    t0 = time.perf_counter()
     board = game_state["board"]
     you = game_state["you"]
     head = you.get("head") or you["body"][0]
@@ -919,6 +920,11 @@ def decide(game_state: Dict[str, Any]) -> Dict[str, Any]:
     health_hunger = max(0.0, min(1.0, (100 - float(you.get("health", 100))) / 100.0))
     # Old floor of 0.92 flatlined hunger every turn — health drops never "hit" the drive.
     d_early = dials_mod.load_dials()
+    # Public Battlesnake ≈500ms; keep a hard ceiling so we never starve mid-tournament.
+    move_budget_ms = float(d_early.get("move_budget_ms", 420) or 420)
+
+    def _ms_left() -> float:
+        return move_budget_ms - (time.perf_counter() - t0) * 1000.0
     hunger_floor = float(d_early.get("hunger_floor", 0.15))
     hunger_curve = float(d_early.get("hunger_curve", 0.65))  # <1 → hungrier sooner as HP falls
     hunger = max(hunger_floor, health_hunger ** hunger_curve if health_hunger > 0 else hunger_floor)
@@ -973,18 +979,28 @@ def decide(game_state: Dict[str, Any]) -> Dict[str, Any]:
     # Cortex: remember rivals + budgeted multi-step plan (before per-move scoring).
     mem = cortex.remember(game_state, d)
     food_keys = {_key(f) for f in (board.get("food") or [])}
-    plan = cortex.plan_move_values(
-        board,
-        you,
-        mem,
-        d,
-        flood=_flood,
-        blocked_fn=_blocked,
-        food_set=food_keys,
-    )
+    plan_w_cfg = float(d.get("plan_weight", 2.8) or 0.0)
+    # Skip expensive beam search when weight is 0 or we're already tight on time.
+    if plan_w_cfg > 0 and _ms_left() > 80:
+        d_plan = dict(d)
+        d_plan["plan_budget_ms"] = min(
+            float(d.get("plan_budget_ms", 45) or 45),
+            max(8.0, _ms_left() - 60.0),
+        )
+        plan = cortex.plan_move_values(
+            board,
+            you,
+            mem,
+            d_plan,
+            flood=_flood,
+            blocked_fn=_blocked,
+            food_set=food_keys,
+        )
+    else:
+        plan = {"values": {}, "meta": {"enabled": False, "skipped": True}}
     plan_vals = plan.get("values") or {}
     plan_meta = plan.get("meta") or {}
-    plan_w = float(d.get("plan_weight", 2.8)) if plan_meta.get("enabled") else 0.0
+    plan_w = plan_w_cfg if plan_meta.get("enabled") else 0.0
     if food_target.get("race") and food_target.get("preferred") and smell_target:
         pref = food_target["preferred"]
         smell_target = {
@@ -1039,6 +1055,9 @@ def decide(game_state: Dict[str, Any]) -> Dict[str, Any]:
         food_in_cone = ahead > 0 and lat <= ahead
 
     scored: List[Dict[str, Any]] = []
+    traj = cortex.rival_trajectory_threats(mem, board, you, d)
+    traj_hi = float(d.get("trajectory_weight", 3.5) or 3.5) * 0.9
+    contested_pen = float(d.get("contested_cell_penalty", 4.5) or 4.5)
     for move in MOVES:
         nxt = _add(head, DELTA[move])
         row: Dict[str, Any] = {"move": move, "fatal": False, "score": -1e9, "space": 0, "coneEmpty": 0}
@@ -1185,6 +1204,11 @@ def decide(game_state: Dict[str, Any]) -> Dict[str, Any]:
         scar_term = -cortex.scar_penalty(mem, nxt, d)
         predict_term = -cortex.habit_threat(mem, nxt, board, you, d)
         away_term = cortex.away_from_rivals_bonus(mem, head, nxt, board, you, d)
+        # Contested next-head: two snakes aiming at same cell — yield if not dominant
+        contested_term = 0.0
+        nxt_k = _key(nxt)
+        if nxt_k in traj and traj[nxt_k] >= traj_hi:
+            contested_term = -contested_pen if not dominant else -0.6 * contested_pen
         plan_term = plan_w * float(plan_vals.get(move, 0.0))
         hunt_term = _hunt_smaller_score(nxt, board, you, d)
         cutoff_term = _cutoff_score(board, you, nxt, on_food, d)
@@ -1299,6 +1323,7 @@ def decide(game_state: Dict[str, Any]) -> Dict[str, Any]:
                 + scar_term
                 + predict_term
                 + away_term
+                + contested_term
                 + hunt_term
                 + cutoff_term
                 + block_term
@@ -1307,16 +1332,19 @@ def decide(game_state: Dict[str, Any]) -> Dict[str, Any]:
         )
         scored.append(row)
 
-    # Full MaleCNS blend — dials are gains on the fixed connectome mapping
+    # Full MaleCNS blend — dials are gains on the fixed connectome mapping.
+    # Skip when latency budget is tight (public games ≈500ms).
     if (
         full_brain is not None
         and full_brain.brain_enabled()
         and float(d.get("brain_blend", 0) or 0) > 0
+        and _ms_left() > float(d.get("brain_min_ms_left", 120) or 120)
     ):
         try:
             food_near = 0.0
             if food_dist_now is not None:
                 food_near = max(0.0, 1.0 - min(1.0, float(food_dist_now) / 6.0))
+            # Danger → ALPN; open space → MBON (dial gains amplify)
             drives = full_brain.board_drives(
                 danger=float(danger_now),
                 safety=float(safety),
@@ -1327,9 +1355,13 @@ def decide(game_state: Dict[str, Any]) -> Dict[str, Any]:
                 panic=bool(panic),
                 visual_open=float(safety),
             )
-            brain_rates, _ch = full_brain.simulate(drives, d)
+            # Trim Euler steps if we're late
+            d_brain = dict(d)
+            if _ms_left() < 200:
+                d_brain["brain_steps"] = min(int(d.get("brain_steps", 6) or 6), 3)
+            brain_rates, _ch = full_brain.simulate(drives, d_brain)
             heur = {s["move"]: float(s["score"]) for s in scored if not s["fatal"]}
-            blended = full_brain.blend_move_scores(heur, brain_rates, d)
+            blended = full_brain.blend_move_scores(heur, brain_rates, d_brain)
             for s in scored:
                 if s["move"] in blended:
                     s["brainRate"] = float(brain_rates.get(s["move"], 0.0))
