@@ -37,9 +37,9 @@ import cortex
 PORT = int(os.environ.get("PORT") or os.environ.get("FS_AVATAR_PORT", "8001"))
 AUTHOR = os.environ.get("FS_AVATAR_AUTHOR", "Walton")
 COLOR = os.environ.get("FS_AVATAR_COLOR", "#141414")
-HEAD = os.environ.get("FS_AVATAR_HEAD", "bee")
-TAIL = os.environ.get("FS_AVATAR_TAIL", "bee")
-SNAKE_NAME = os.environ.get("FS_AVATAR_NAME", "Walton-LoFly-v0.1")
+HEAD = os.environ.get("FS_AVATAR_HEAD", "smart-caterpillar")
+TAIL = os.environ.get("FS_AVATAR_TAIL", "fat-rattle")
+SNAKE_NAME = os.environ.get("FS_AVATAR_NAME", "Walton-LoFly")
 
 MOVES = ("up", "down", "left", "right")
 DELTA = {
